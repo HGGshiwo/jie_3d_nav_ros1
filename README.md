@@ -8,6 +8,12 @@
 pip3 install vtk open3d
 ```
 
+字体安装（可选）
+```
+sudo apt-get update
+sudo apt-get install -y fonts-wqy-zenhei fonts-wqy-microhei 
+```
+
 ## 功能包构成
 
 本目录包含三个 ROS 1 功能包：

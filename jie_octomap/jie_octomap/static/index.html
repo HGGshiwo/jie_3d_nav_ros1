@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Web 地图编辑器</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; color: #ddd; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        #ui-panel { position: absolute; top: 10px; left: 10px; background: rgba(30,30,30,0.9); padding: 15px; border-radius: 8px; width: 320px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .row { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+        input[type="text"], input[type="number"] { width: 100px; padding: 4px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;}
+        button { padding: 6px 12px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 4px; font-weight: bold;}
+        button:hover { background: #45a049; }
+        .btn-danger { background: #f44336; }
+        .btn-danger:hover { background: #d32f2f; }
+        .btn-sync { background: #2196F3; width: 100%; margin-top: 5px; }
+        .btn-view { background: #444; font-size: 13px; padding: 6px 8px; flex: 1; text-align: center; }
+        .btn-view:hover { background: #555; }
+        hr { border-color: #444; }
+        .active { border: 2px solid #fff; box-shadow: 0 0 8px #fff; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/static/three.module.js",
+          "three/addons/controls/OrbitControls.js": "/static/OrbitControls.js"
+        }
+      }
+    </script>
+</head>
+<body>
+    <div id="ui-panel">
+        <h3>文件管理</h3>
+        <div class="row">
+            <span>目录:</span> <input type="text" id="root-path" value="/home/robot/maps" style="width: 200px;">
+        </div>
+        <div class="row">
+            <span>名称:</span> <input type="text" id="map-name" value="map">
+            <button id="btn-load">加载</button>
+        </div>
+        <hr>
+        <h3>栅格编辑</h3>
+        <div class="row" style="display: flex; gap: 10px; justify-content: flex-start; flex-wrap: wrap;">
+            <label><input type="radio" name="tool" value="view" checked> 拖动视角</label>
+            <label><input type="radio" name="tool" value="brush"> 画笔</label>
+            <label><input type="radio" name="tool" value="eraser"> 橡皮擦</label>
+            <label><input type="radio" name="tool" value="start"> 设起点</label>
+            <label><input type="radio" name="tool" value="goal"> 设终点</label>
+        </div>
+        <div class="row">
+            <span>目标图层:</span>
+            <select id="edit-layer" style="background:#333;color:white;padding:4px;">
+                <option value="occupied">占据 (橙色)</option>
+                <option value="preblocked">禁行 (红色)</option>
+            </select>
+        </div>
+        <div class="row">
+            <span>画笔大小:</span> <input type="number" id="brush-size" value="1" min="1" max="10">
+        </div>
+        <div class="row">
+            <span>Z轴平面 (m):</span> <input type="number" id="edit-z" value="0.0" step="0.2">
+        </div>
+        <div class="row" style="display: flex; gap: 15px; justify-content: flex-start;">
+            <span>图层显隐:</span>
+            <label><input type="checkbox" id="show-occupied" checked> 占据(橙)</label>
+            <label><input type="checkbox" id="show-preblocked" checked> 禁行(红)</label>
+        </div>
+        <hr>
+        <h3>视角调整</h3>
+        <div class="row" style="display: flex; gap: 6px; justify-content: space-between; margin-bottom: 10px;">
+            <button id="btn-view-default" class="btn-view">默认</button>
+            <button id="btn-view-top" class="btn-view">顶视</button>
+            <button id="btn-view-front" class="btn-view">前视</button>
+            <button id="btn-view-side" class="btn-view">侧视</button>
+        </div>
+        <hr>
+        <button id="btn-sync" class="btn-sync">实时同步至 ROS</button>
+        <button id="btn-save" class="btn-sync" style="background:#FF9800;">永久保存地图</button>
+        <div id="status" style="margin-top: 10px; font-size: 12px; color: #8bc34a;">就绪</div>
+    </div>
+    <div id="canvas-container"></div>
+    <script type="module" src="/static/app.js"></script>
+</body>
+</html>

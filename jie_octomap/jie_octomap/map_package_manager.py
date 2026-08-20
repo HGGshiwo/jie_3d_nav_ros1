@@ -144,7 +144,7 @@ class MapPackageManager:
         try:
             proxy = rospy.ServiceProxy(self._export_service, ExportNavigationSnapshot)
             req = ExportNavigationSnapshotRequest()
-            req.recompute_layers = True
+            req.recompute_layers = False
             resp = proxy(req)
             return resp.success, resp.message, resp
         except rospy.ServiceException as exc:
@@ -167,18 +167,28 @@ class MapPackageManager:
     def _handle_save_package(self, request):
         response = SaveNavigationMapPackageResponse()
 
+        def log_progress(step, total, desc):
+            bar_len = 30
+            filled_len = int(round(bar_len * step / float(total)))
+            percents = round(100.0 * step / float(total), 1)
+            bar = '=' * filled_len + '-' * (bar_len - filled_len)
+            rospy.loginfo(f"【地图保存进度】 [{bar}] {percents}% - {desc}")
+
+        log_progress(0, 5, "触发 C++ 节点重新计算图层快照...")
         export_ok, export_msg, export_result = self._call_export_snapshot()
         if not export_ok or export_result is None:
             response.success = False
             response.message = export_msg
             return response
 
+        log_progress(1, 5, "C++ 图层重新计算完成，正在获取地图元数据...")
         meta_ok, meta_msg, meta = self._call_get_meta()
         if not meta_ok or meta is None:
             response.success = False
             response.message = meta_msg
             return response
 
+        log_progress(2, 5, "准备序列化并压缩保存 OctoMap...")
         with self._lock:
             octomap = copy.deepcopy(self._latest_octomap)
             preblocked = copy.deepcopy(self._latest_preblocked)
@@ -215,15 +225,33 @@ class MapPackageManager:
             data=np.array(octomap.data, dtype=np.int8),
         )
 
+        log_progress(3, 5, "OctoMap 文件保存成功，开始解析各网格图层与风险点云...")
+
         # Save layers
         preblocked_points = self._marker_points_to_numpy(preblocked)
         traversable_points = self._marker_points_to_numpy(traversable)
 
-        risk_records = list(pc2.read_points(
-            risk_cost, field_names=("x", "y", "z", "intensity"), skip_nans=True))
-        risk_arr = (np.array([[r[0], r[1], r[2], r[3]] for r in risk_records], dtype=np.float32)
-                    if risk_records else np.empty((0, 4), dtype=np.float32))
+        # 优化点云解析：如果 point_step 是 16 bytes，使用 numpy 极速反序列化以消除 pc2.read_points 产生的数十秒卡顿
+        try:
+            if hasattr(risk_cost, 'point_step') and risk_cost.point_step == 16:
+                # 每个点为 x,y,z,intensity，皆为 float32
+                data_arr = np.frombuffer(risk_cost.data, dtype=np.float32).reshape(-1, 4)
+                # 过滤掉其中的 NaN 值（相当于 skip_nans=True）
+                risk_arr = data_arr[~np.isnan(data_arr).any(axis=1)]
+            else:
+                # 回退原解析方式
+                risk_records = list(pc2.read_points(
+                    risk_cost, field_names=("x", "y", "z", "intensity"), skip_nans=True))
+                risk_arr = (np.array([[r[0], r[1], r[2], r[3]] for r in risk_records], dtype=np.float32)
+                            if risk_records else np.empty((0, 4), dtype=np.float32))
+        except Exception as e:
+            rospy.logwarn(f"Numpy 极速解析点云异常，回退至原生解析: {e}")
+            risk_records = list(pc2.read_points(
+                risk_cost, field_names=("x", "y", "z", "intensity"), skip_nans=True))
+            risk_arr = (np.array([[r[0], r[1], r[2], r[3]] for r in risk_records], dtype=np.float32)
+                        if risk_records else np.empty((0, 4), dtype=np.float32))
 
+        log_progress(4, 5, "正在压缩保存各图层数据 (layers.npz)...")
         np.savez_compressed(
             layers_file,
             preblocked_points=preblocked_points,
@@ -277,6 +305,7 @@ class MapPackageManager:
         with meta_file.open("w", encoding="utf-8") as f:
             yaml.safe_dump(meta_yaml, f, sort_keys=False, allow_unicode=True)
 
+        log_progress(5, 5, "保存全部地图文件成功！")
         response.success = True
         response.message = "map package saved"
         response.manifest_path = str(meta_file)

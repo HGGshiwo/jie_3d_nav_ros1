@@ -42,10 +42,11 @@ struct GridIndexHash
 {
   std::size_t operator()(const GridIndex & k) const
   {
-    const std::size_t h1 = std::hash<int>{}(k.x);
-    const std::size_t h2 = std::hash<int>{}(k.y);
-    const std::size_t h3 = std::hash<int>{}(k.z);
-    return h1 ^ (h2 << 1) ^ (h3 << 2);
+    std::size_t seed = 0;
+    seed ^= std::hash<int>{}(k.x) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    seed ^= std::hash<int>{}(k.y) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    seed ^= std::hash<int>{}(k.z) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    return seed;
   }
 };
 
@@ -95,7 +96,9 @@ public:
     planning_in_progress_(false),
     plan_seq_(0),
     last_success_seq_(0),
-    last_octomap_hash_(0)
+    last_octomap_hash_(0),
+    min_idx_{0, 0, 0},
+    max_idx_{0, 0, 0}
   {
     // Parameters
     pnh_.param<std::string>("octomap_topic", octomap_topic_, "/octomap");
@@ -229,6 +232,13 @@ private:
     }
     map_ready_ = true;
     last_octomap_hash_ = map_hash;
+
+    double min_x, min_y, min_z, max_x, max_y, max_z;
+    octree_->getMetricMin(min_x, min_y, min_z);
+    octree_->getMetricMax(max_x, max_y, max_z);
+    min_idx_ = worldToGrid(min_x, min_y, min_z);
+    max_idx_ = worldToGrid(max_x, max_y, max_z);
+
     rebuildPreblockedCells();
     rebuildDerivedLayers();
     rebuildPreblockedCostmap();
@@ -240,6 +250,7 @@ private:
       ROS_WARN("Ignored edited occupied marker because it is not CUBE_LIST.");
       return;
     }
+    external_preblocked_cells_.clear();
     const double resolution = markerResolution(*msg);
     if (resolution <= 0.0) {
       ROS_WARN("Ignored edited occupied marker because scale is invalid.");
@@ -255,6 +266,13 @@ private:
     octree_ = edited_tree;
     map_ready_ = true;
     last_octomap_hash_ = 0;
+
+    double min_x, min_y, min_z, max_x, max_y, max_z;
+    octree_->getMetricMin(min_x, min_y, min_z);
+    octree_->getMetricMax(max_x, max_y, max_z);
+    min_idx_ = worldToGrid(min_x, min_y, min_z);
+    max_idx_ = worldToGrid(max_x, max_y, max_z);
+
     if (!msg->header.frame_id.empty()) frame_id_ = msg->header.frame_id;
 
     publishCurrentOctomap();
@@ -292,6 +310,7 @@ private:
       return;
     }
     octomap_pub_.publish(msg);
+    last_octomap_hash_ = hashOctomapData(msg.data);
   }
 
   void onStart(const geometry_msgs::PointStamped::ConstPtr & msg)
@@ -377,13 +396,9 @@ private:
 
   bool isInsideMetricBounds(const GridIndex & idx) const
   {
-    double min_x, min_y, min_z, max_x, max_y, max_z;
-    octree_->getMetricMin(min_x, min_y, min_z);
-    octree_->getMetricMax(max_x, max_y, max_z);
-    const auto p = gridToWorld(idx);
-    return p.x() >= static_cast<float>(min_x) && p.x() <= static_cast<float>(max_x) &&
-           p.y() >= static_cast<float>(min_y) && p.y() <= static_cast<float>(max_y) &&
-           p.z() >= static_cast<float>(min_z) && p.z() <= static_cast<float>(max_z);
+    return idx.x >= min_idx_.x && idx.x <= max_idx_.x &&
+           idx.y >= min_idx_.y && idx.y <= max_idx_.y &&
+           idx.z >= min_idx_.z && idx.z <= max_idx_.z;
   }
 
   bool hasGroundSupport(const GridIndex & idx, bool strict, int xy_r, int depth) const
@@ -509,22 +524,34 @@ private:
     const int radius_cells = std::max(1, preblocked_costmap_radius_cells_);
     const double denom = static_cast<double>(radius_cells) + 1.0;
 
-    for (const auto & c : preblocked_cells_) {
-      for (int dx = -radius_cells; dx <= radius_cells; ++dx)
-        for (int dy = -radius_cells; dy <= radius_cells; ++dy)
-          for (int dz = -radius_cells; dz <= radius_cells; ++dz) {
-            if (dx == 0 && dy == 0 && dz == 0) continue;
-            const GridIndex n{c.x + dx, c.y + dy, c.z + dz};
-            if (!isInsideMetricBounds(n)) continue;
-            if (traversable_cells_.find(n) == traversable_cells_.end()) continue;
-            if (preblocked_cells_.find(n) != preblocked_cells_.end()) continue;
-            const double d = std::sqrt(static_cast<double>(dx * dx + dy * dy + dz * dz));
-            if (d > static_cast<double>(radius_cells)) continue;
-            const double cst = std::max(0.0, (denom - d) / denom);
-            auto it = preblocked_costmap_.find(n);
-            if (it == preblocked_costmap_.end() || cst > it->second)
-              preblocked_costmap_[n] = cst;
+    // 预计算有效偏移量和对应代价值
+    std::vector<std::pair<GridIndex, double>> valid_offsets;
+    for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+      for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+        for (int dz = -radius_cells; dz <= radius_cells; ++dz) {
+          if (dx == 0 && dy == 0 && dz == 0) continue;
+          double d = std::sqrt(static_cast<double>(dx * dx + dy * dy + dz * dz));
+          if (d > static_cast<double>(radius_cells)) continue;
+          double cst = std::max(0.0, (denom - d) / denom);
+          valid_offsets.push_back({{dx, dy, dz}, cst});
+        }
+      }
+    }
+
+    // 遍历可通行格子（因为可通行格子的数量通常远小于禁行格子，可以大幅减少循环次数）
+    for (const auto & t : traversable_cells_) {
+      double max_cst = 0.0;
+      for (const auto & off : valid_offsets) {
+        GridIndex c{t.x + off.first.x, t.y + off.first.y, t.z + off.first.z};
+        if (preblocked_cells_.find(c) != preblocked_cells_.end()) {
+          if (off.second > max_cst) {
+            max_cst = off.second;
           }
+        }
+      }
+      if (max_cst > 0.0) {
+        preblocked_costmap_[t] = max_cst;
+      }
     }
 
     ROS_INFO("Preblocked costmap rebuilt. cells=%zu radius=%d",
@@ -549,19 +576,61 @@ private:
     const GridIndex min_idx = worldToGrid(min_x, min_y, min_z);
     const GridIndex max_idx = worldToGrid(max_x, max_y, max_z);
 
-    for (int x = min_idx.x; x <= max_idx.x; ++x)
-      for (int y = min_idx.y; y <= max_idx.y; ++y)
-        for (int z = min_idx.z; z <= max_idx.z; ++z) {
-          const GridIndex idx{x, y, z};
-          if (!isInsideMetricBounds(idx) || isOccupiedCell(idx)) continue;
-          if (isCellTraversable(idx, robot_radius_, require_ground_support_,
-                strict_direct_ground_support_, ground_support_xy_radius_cells_,
-                ground_support_depth_cells_))
-          {
-            traversable_cells_.insert(idx);
-            if (lowest_traversable_only_) break;
+    long long volume = static_cast<long long>(max_idx.x - min_idx.x + 1) *
+                       (max_idx.y - min_idx.y + 1) *
+                       (max_idx.z - min_idx.z + 1);
+
+    ROS_INFO("rebuildDerivedLayers: bounds min=(%d,%d,%d) max=(%d,%d,%d) volume=%lld occupied_leaves=%zu",
+      min_idx.x, min_idx.y, min_idx.z, max_idx.x, max_idx.y, max_idx.z, volume, octree_->getNumLeafNodes());
+
+    if (require_ground_support_) {
+      std::unordered_set<GridIndex, GridIndexHash> candidates;
+      const int xy_r = ground_support_xy_radius_cells_;
+      const int depth = ground_support_depth_cells_;
+
+      for (auto it = octree_->begin_leafs(); it != octree_->end_leafs(); ++it) {
+        if (!octree_->isNodeOccupied(*it)) continue;
+        const GridIndex occ = worldToGrid(it.getX(), it.getY(), it.getZ());
+        
+        for (int dz = 1; dz <= std::max(1, depth); ++dz) {
+          for (int dx = -xy_r; dx <= xy_r; ++dx) {
+            for (int dy = -xy_r; dy <= xy_r; ++dy) {
+              const GridIndex candidate{occ.x + dx, occ.y + dy, occ.z + dz};
+              if (isInsideMetricBounds(candidate) && !isOccupiedCell(candidate)) {
+                candidates.insert(candidate);
+              }
+            }
           }
         }
+      }
+
+      ROS_INFO("rebuildDerivedLayers: generated %zu candidates from ground support", candidates.size());
+
+      for (const auto & idx : candidates) {
+        if (isCellTraversable(idx, robot_radius_, require_ground_support_,
+              strict_direct_ground_support_, ground_support_xy_radius_cells_,
+              ground_support_depth_cells_))
+        {
+          traversable_cells_.insert(idx);
+        }
+      }
+    } else {
+      for (int x = min_idx.x; x <= max_idx.x; ++x)
+        for (int y = min_idx.y; y <= max_idx.y; ++y)
+          for (int z = min_idx.z; z <= max_idx.z; ++z) {
+            const GridIndex idx{x, y, z};
+            if (!isInsideMetricBounds(idx) || isOccupiedCell(idx)) continue;
+            if (isCellTraversable(idx, robot_radius_, require_ground_support_,
+                  strict_direct_ground_support_, ground_support_xy_radius_cells_,
+                  ground_support_depth_cells_))
+            {
+              traversable_cells_.insert(idx);
+              if (lowest_traversable_only_) break;
+            }
+          }
+    }
+
+    ROS_INFO("rebuildDerivedLayers finished. traversable_cells=%zu", traversable_cells_.size());
 
     publishCellSetMarker(traversable_cells_, traversable_marker_pub_, "traversable_cells",
       0.20F, 0.95F, 0.55F, 0.55F);
@@ -573,7 +642,11 @@ private:
     if (!isInsideMetricBounds(idx)) return false;
     if (require_ground_support && !hasGroundSupport(idx, strict, xy_r, depth)) return false;
 
-    for (int z = idx.z - 1; z >= 0; --z) {
+    double min_x, min_y, min_z, max_x, max_y, max_z;
+    octree_->getMetricMin(min_x, min_y, min_z);
+    const int min_z_idx = static_cast<int>(std::floor(min_z / octree_->getResolution()));
+
+    for (int z = idx.z - 1; z >= min_z_idx; --z) {
       const GridIndex below_idx{idx.x, idx.y, z};
       if (isOccupiedCell(below_idx)) break;
       if (preblocked_cells_.find(below_idx) != preblocked_cells_.end()) return false;
@@ -869,6 +942,7 @@ private:
   geometry_msgs::PointStamped start_point_, goal_point_;
   geometry_msgs::PoseStamped goal_pose_;
   std::shared_ptr<octomap::OcTree> octree_;
+  GridIndex min_idx_, max_idx_;
   std::unordered_set<GridIndex, GridIndexHash> traversable_cells_;
   std::unordered_set<GridIndex, GridIndexHash> preblocked_cells_;
   std::unordered_set<GridIndex, GridIndexHash> external_preblocked_cells_;

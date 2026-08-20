@@ -398,12 +398,18 @@ class RosMapImportWindow(QWidget):
         cube.SetXLength(float(scale[0]))
         cube.SetYLength(float(scale[1]))
         cube.SetZLength(float(scale[2]))
-        glyph = vtk.vtkGlyph3DMapper()
+        
+        glyph = vtk.vtkGlyph3D()
         glyph.SetInputData(pd)
         glyph.SetSourceConnection(cube.GetOutputPort())
         glyph.ScalingOff()
+        glyph.Update()
+        
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(glyph.GetOutputPort())
+        
         actor = vtk.vtkActor()
-        actor.SetMapper(glyph)
+        actor.SetMapper(mapper)
         actor.GetProperty().SetColor(*color)
         actor.GetProperty().SetOpacity(opacity)
         actor.GetProperty().SetInterpolationToFlat()
@@ -414,12 +420,18 @@ class RosMapImportWindow(QWidget):
         edge_cube.SetZLength(float(scale[2]))
         edge_ext = vtk.vtkExtractEdges()
         edge_ext.SetInputConnection(edge_cube.GetOutputPort())
-        edge_glyph = vtk.vtkGlyph3DMapper()
+        
+        edge_glyph = vtk.vtkGlyph3D()
         edge_glyph.SetInputData(pd)
         edge_glyph.SetSourceConnection(edge_ext.GetOutputPort())
         edge_glyph.ScalingOff()
+        edge_glyph.Update()
+        
+        edge_mapper = vtk.vtkPolyDataMapper()
+        edge_mapper.SetInputConnection(edge_glyph.GetOutputPort())
+        
         edge_actor = vtk.vtkActor()
-        edge_actor.SetMapper(edge_glyph)
+        edge_actor.SetMapper(edge_mapper)
         edge_actor.GetProperty().SetColor(0.0, 0.0, 0.0)
         edge_actor.GetProperty().SetLineWidth(1.0)
         edge_actor.GetProperty().SetOpacity(1.0)

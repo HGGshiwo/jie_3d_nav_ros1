@@ -28,6 +28,8 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -55,6 +57,7 @@ class PcdMapImportNode:
 
         self._initialized = True
         rospy.loginfo("Creating PcdMapImportNode (first and only time)")
+        self._lock = threading.Lock()
 
         # Publishers
         self.file_pub = rospy.Publisher("/pcd_file_cmd", String, queue_size=1)
@@ -112,40 +115,47 @@ class PcdMapImportNode:
         self.goal_pose_pub.publish(msg)
 
     def _on_occupied(self, msg: Marker) -> None:
-        self._store_marker("occupied", msg)
+        with self._lock:
+            self._store_marker("occupied", msg)
 
     def _on_preblocked(self, msg: Marker) -> None:
-        self._store_marker("preblocked", msg)
+        with self._lock:
+            self._store_marker("preblocked", msg)
 
     def _on_traversable(self, msg: Marker) -> None:
-        self._store_marker("traversable", msg)
+        with self._lock:
+            self._store_marker("traversable", msg)
 
     def _on_path(self, msg: PathMsg) -> None:
-        self._latest_path_points = [
-            (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
-            for pose in msg.poses
-        ]
-        self._path_dirty = True
+        with self._lock:
+            self._latest_path_points = [
+                (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
+                for pose in msg.poses
+            ]
+            self._path_dirty = True
 
     def _on_risk(self, msg: PointCloud2) -> None:
         records = list(pc2.read_points(msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
-        if not records:
-            xyz = np.empty((0, 3), dtype=np.float32)
-            intensity = np.empty((0,), dtype=np.float32)
-        else:
-            values = np.array([[r[0], r[1], r[2], r[3]] for r in records], dtype=np.float32)
-            xyz = values[:, :3]
-            intensity = values[:, 3]
-        self._latest_risk = (xyz, self._infer_voxel_scale(), intensity)
-        self._risk_dirty = True
+        with self._lock:
+            if not records:
+                xyz = np.empty((0, 3), dtype=np.float32)
+                intensity = np.empty((0,), dtype=np.float32)
+            else:
+                values = np.array([[r[0], r[1], r[2], r[3]] for r in records], dtype=np.float32)
+                xyz = values[:, :3]
+                intensity = values[:, 3]
+            self._latest_risk = (xyz, self._infer_voxel_scale(), intensity)
+            self._risk_dirty = True
 
     def _infer_voxel_scale(self) -> np.ndarray:
+        # Note: caller should hold the lock
         for layer in (self._latest_occupied, self._latest_preblocked, self._latest_traversable):
             if layer is not None:
                 return np.asarray(layer[1], dtype=np.float32)
         return np.array([0.2, 0.2, 0.2], dtype=np.float32)
 
     def _store_marker(self, layer_name: str, msg: Marker) -> None:
+        # Note: caller should hold the lock
         if msg.type != Marker.CUBE_LIST:
             return
         points = np.array([[p.x, p.y, p.z] for p in msg.points], dtype=np.float32)
@@ -159,26 +169,29 @@ class PcdMapImportNode:
         self._layer_dirty = True
 
     def consume_layers(self):
-        if not self._layer_dirty:
-            return None
-        self._layer_dirty = False
-        return {
-            "occupied":    self._latest_occupied,
-            "preblocked":  self._latest_preblocked,
-            "traversable": self._latest_traversable,
-        }
+        with self._lock:
+            if not self._layer_dirty:
+                return None
+            self._layer_dirty = False
+            return {
+                "occupied":    self._latest_occupied,
+                "preblocked":  self._latest_preblocked,
+                "traversable": self._latest_traversable,
+            }
 
     def consume_path(self):
-        if not self._path_dirty:
-            return None
-        self._path_dirty = False
-        return list(self._latest_path_points)
+        with self._lock:
+            if not self._path_dirty:
+                return None
+            self._path_dirty = False
+            return list(self._latest_path_points)
 
     def consume_risk(self):
-        if not self._risk_dirty or self._latest_risk is None:
-            return None
-        self._risk_dirty = False
-        return self._latest_risk
+        with self._lock:
+            if not self._risk_dirty or self._latest_risk is None:
+                return None
+            self._risk_dirty = False
+            return self._latest_risk
 
     def save_package(self, package_path: str, overwrite: bool, timeout_sec: float = 100.0):
         service_name = "/map_package_manager/save_package"
@@ -288,30 +301,22 @@ class PcdMapImportWindow(QWidget):
         pcd_row.addWidget(pcd_btn)
         import_form.addRow("PCD 文件", pcd_row)
 
+        ros_res = rospy.get_param("/pcd_to_octomap/resolution", 0.2)
         self.resolution_spin = QDoubleSpinBox()
         self.resolution_spin.setDecimals(3)
         self.resolution_spin.setRange(0.01, 2.0)
         self.resolution_spin.setSingleStep(0.05)
-        self.resolution_spin.setValue(0.2)
+        self.resolution_spin.setValue(ros_res)
         self.resolution_spin.setEnabled(False)
         import_form.addRow("Octomap分辨率", self.resolution_spin)
 
+        ros_downsample = rospy.get_param("/pcd_to_octomap/voxel_downsample_m", 0.1)
         self.downsample_spin = QDoubleSpinBox()
         self.downsample_spin.setDecimals(3)
         self.downsample_spin.setRange(0.0, 2.0)
         self.downsample_spin.setSingleStep(0.05)
-        self.downsample_spin.setValue(0.1)
+        self.downsample_spin.setValue(ros_downsample)
         import_form.addRow("降采样体素(m)", self.downsample_spin)
-
-        for label, slot in [
-            ("统计离群点滤波", self._apply_statistical_filter),
-            ("半径离群点滤波", self._apply_radius_filter),
-            ("删除小簇",       self._apply_cluster_filter),
-            ("平面范围裁剪",   self._apply_ransac_filter),
-        ]:
-            btn = QPushButton(label)
-            btn.clicked.connect(slot)
-            import_form.addRow("", btn)
 
         save_pcd_btn = QPushButton("保存 PCD 文件")
         save_pcd_btn.clicked.connect(self._save_edited_pcd)
@@ -321,6 +326,83 @@ class PcdMapImportWindow(QWidget):
         convert_btn.clicked.connect(self._convert_to_octomap)
         import_form.addRow("", convert_btn)
         import_group.setLayout(import_form)
+
+        filter_param_group = QGroupBox("滤波器微调与建议")
+        filter_param_form = QFormLayout()
+
+        # 统计滤波
+        self.stat_neighbors_spin = QSpinBox()
+        self.stat_neighbors_spin.setRange(1, 500)
+        self.stat_neighbors_spin.setValue(20)
+        self.stat_std_ratio_spin = QDoubleSpinBox()
+        self.stat_std_ratio_spin.setDecimals(2)
+        self.stat_std_ratio_spin.setRange(0.1, 10.0)
+        self.stat_std_ratio_spin.setSingleStep(0.1)
+        self.stat_std_ratio_spin.setValue(1.5)
+        btn_stat = QPushButton("执行 统计离群点滤波")
+        btn_stat.clicked.connect(self._apply_statistical_filter)
+
+        filter_param_form.addRow("<b>1. 统计离群点滤波</b>", QLabel())
+        filter_param_form.addRow("  • 邻居点数", self.stat_neighbors_spin)
+        filter_param_form.addRow("  • 标准差倍数", self.stat_std_ratio_spin)
+        filter_param_form.addRow("", btn_stat)
+
+        # 半径滤波
+        self.radius_filter_radius_spin = QDoubleSpinBox()
+        self.radius_filter_radius_spin.setDecimals(2)
+        self.radius_filter_radius_spin.setRange(0.01, 10.0)
+        self.radius_filter_radius_spin.setSingleStep(0.05)
+        self.radius_filter_radius_spin.setValue(0.30)
+        self.radius_filter_points_spin = QSpinBox()
+        self.radius_filter_points_spin.setRange(1, 500)
+        self.radius_filter_points_spin.setValue(4)
+        btn_radius = QPushButton("执行 半径离群点滤波")
+        btn_radius.clicked.connect(self._apply_radius_filter)
+
+        filter_param_form.addRow("<b>2. 半径离群点滤波</b>", QLabel())
+        filter_param_form.addRow("  • 搜索半径(m)", self.radius_filter_radius_spin)
+        filter_param_form.addRow("  • 最少邻居点数", self.radius_filter_points_spin)
+        filter_param_form.addRow("", btn_radius)
+
+        # 删除小簇
+        self.cluster_eps_spin = QDoubleSpinBox()
+        self.cluster_eps_spin.setDecimals(2)
+        self.cluster_eps_spin.setRange(0.01, 10.0)
+        self.cluster_eps_spin.setSingleStep(0.05)
+        self.cluster_eps_spin.setValue(0.30)
+        self.cluster_min_points_spin = QSpinBox()
+        self.cluster_min_points_spin.setRange(1, 500)
+        self.cluster_min_points_spin.setValue(6)
+        self.cluster_size_spin = QSpinBox()
+        self.cluster_size_spin.setRange(1, 10000)
+        self.cluster_size_spin.setValue(30)
+        btn_cluster = QPushButton("执行 删除小簇")
+        btn_cluster.clicked.connect(self._apply_cluster_filter)
+
+        filter_param_form.addRow("<b>3. 删除小簇 (DBSCAN)</b>", QLabel())
+        filter_param_form.addRow("  • 聚类半径(m)", self.cluster_eps_spin)
+        filter_param_form.addRow("  • 核心点邻居数", self.cluster_min_points_spin)
+        filter_param_form.addRow("  • 最小簇点数", self.cluster_size_spin)
+        filter_param_form.addRow("", btn_cluster)
+
+        # 平面裁剪
+        btn_ransac = QPushButton("执行 平面范围裁剪")
+        btn_ransac.clicked.connect(self._apply_ransac_filter)
+        filter_param_form.addRow("<b>4. RANSAC 平面范围裁剪</b>", QLabel())
+        filter_param_form.addRow("", btn_ransac)
+
+        # 建议
+        advice_label = QLabel(
+            "<b>💡 调参建议：</b><br>"
+            "1. <b>点云稀疏断开：</b> 减小或设【降采样体素(m)】为 0（不降采样），然后重新加载PCD。<br>"
+            "2. <b>半径离群点滤波：</b> 调大【搜索半径】（如 0.3 - 0.5m），调小【最少邻居点数】（如 2 - 5）。<br>"
+            "3. <b>删除小簇：</b> 调大【聚类半径】（如 0.3 - 0.5m），调小【核心点邻居数】（如 3 - 6）和【最小簇点数】（如 15 - 30）。"
+        )
+        advice_label.setWordWrap(True)
+        advice_label.setStyleSheet("color: #2c3e50; font-size: 11px; background-color: #f8f9fa; border: 1px solid #dcdde1; padding: 6px; border-radius: 4px; margin-top: 10px;")
+        filter_param_form.addRow(advice_label)
+
+        filter_param_group.setLayout(filter_param_form)
 
         save_group = QGroupBox("Octomap地图保存")
         save_form = QFormLayout()
@@ -351,11 +433,12 @@ class PcdMapImportWindow(QWidget):
 
         left_panel = QVBoxLayout()
         left_panel.addWidget(import_group)
+        left_panel.addWidget(filter_param_group)
         left_panel.addWidget(save_group)
         left_panel.addWidget(self.status_label)
-        left_panel_widget = QWidget()
-        left_panel_widget.setLayout(left_panel)
-        left_panel_widget.setFixedWidth(360)
+        left_panel_container = QWidget()
+        left_panel_container.setLayout(left_panel)
+        left_panel_container.setFixedWidth(380)
 
         viewer_layout = QHBoxLayout()
 
@@ -421,7 +504,11 @@ class PcdMapImportWindow(QWidget):
         viewer_layout.addWidget(pcd_view_group, 1)
         viewer_layout.addWidget(octomap_view_group, 1)
 
-        top_row.addWidget(left_panel_widget, 0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(left_panel_container)
+        scroll_area.setFixedWidth(410)
+        top_row.addWidget(scroll_area, 0)
         top_row.addLayout(viewer_layout, 1)
         root.addLayout(top_row)
         self.setLayout(root)
@@ -807,7 +894,9 @@ class PcdMapImportWindow(QWidget):
         cloud = self._require_working_cloud()
         if cloud is None:
             return
-        filtered_cloud, inlier_indices = cloud.remove_statistical_outlier(nb_neighbors=20, std_ratio=1.5)
+        nb_neighbors = self.stat_neighbors_spin.value()
+        std_ratio = self.stat_std_ratio_spin.value()
+        filtered_cloud, inlier_indices = cloud.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
         if len(inlier_indices) == 0:
             QMessageBox.warning(self, "PCD 处理", "统计离群点滤波后没有保留任何点。")
             return
@@ -817,8 +906,9 @@ class PcdMapImportWindow(QWidget):
         cloud = self._require_working_cloud()
         if cloud is None:
             return
-        radius = max(float(self.downsample_spin.value()) * 2.0, 0.20)
-        filtered_cloud, inlier_indices = cloud.remove_radius_outlier(nb_points=12, radius=radius)
+        radius = self.radius_filter_radius_spin.value()
+        nb_points = self.radius_filter_points_spin.value()
+        filtered_cloud, inlier_indices = cloud.remove_radius_outlier(nb_points=nb_points, radius=radius)
         if len(inlier_indices) == 0:
             QMessageBox.warning(self, "PCD 处理", "半径离群点滤波后没有保留任何点。")
             return
@@ -828,14 +918,16 @@ class PcdMapImportWindow(QWidget):
         cloud = self._require_working_cloud()
         if cloud is None:
             return
-        eps = max(float(self.downsample_spin.value()) * 2.0, 0.20)
-        labels = np.asarray(cloud.cluster_dbscan(eps=eps, min_points=20, print_progress=False))
+        eps = self.cluster_eps_spin.value()
+        min_points = self.cluster_min_points_spin.value()
+        labels = np.asarray(cloud.cluster_dbscan(eps=eps, min_points=min_points, print_progress=False))
         if labels.size == 0 or np.all(labels < 0):
             QMessageBox.warning(self, "PCD 处理", "没有检测到有效聚类。")
             return
         valid_labels = labels[labels >= 0]
         cluster_ids, cluster_sizes = np.unique(valid_labels, return_counts=True)
-        keep_cluster_ids = cluster_ids[cluster_sizes >= 100]
+        min_cluster_size = self.cluster_size_spin.value()
+        keep_cluster_ids = cluster_ids[cluster_sizes >= min_cluster_size]
         if keep_cluster_ids.size == 0:
             QMessageBox.warning(self, "PCD 处理", "删除小簇后没有保留任何聚类。")
             return
@@ -941,38 +1033,47 @@ class PcdMapImportWindow(QWidget):
         return actor
 
     def _build_voxel_actors(self, points, scale, color, opacity):
+        rospy.loginfo(f"[DEBUG] _build_voxel_actors started. Points shape: {points.shape}")
         vtk_points = vtk.vtkPoints()
         vtk_points.SetData(numpy_support.numpy_to_vtk(points.astype(np.float32), deep=True))
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(vtk_points)
+        
+        # 1. Main solid voxels
         cube = vtk.vtkCubeSource()
         cube.SetXLength(float(scale[0]))
         cube.SetYLength(float(scale[1]))
         cube.SetZLength(float(scale[2]))
-        glyph = vtk.vtkGlyph3DMapper()
-        glyph.SetInputData(polydata)
-        glyph.SetSourceConnection(cube.GetOutputPort())
-        glyph.ScalingOff()
+        
+        mapper = vtk.vtkGlyph3DMapper()
+        mapper.SetInputData(polydata)
+        mapper.SetSourceConnection(cube.GetOutputPort())
+        
         actor = vtk.vtkActor()
-        actor.SetMapper(glyph)
+        actor.SetMapper(mapper)
         actor.GetProperty().SetColor(*color)
         actor.GetProperty().SetOpacity(opacity)
         actor.GetProperty().SetInterpolationToFlat()
+        
+        # 2. Voxel edges
         edge_cube = vtk.vtkCubeSource()
         edge_cube.SetXLength(float(scale[0]))
         edge_cube.SetYLength(float(scale[1]))
         edge_cube.SetZLength(float(scale[2]))
         edge_extract = vtk.vtkExtractEdges()
         edge_extract.SetInputConnection(edge_cube.GetOutputPort())
-        edge_glyph = vtk.vtkGlyph3DMapper()
-        edge_glyph.SetInputData(polydata)
-        edge_glyph.SetSourceConnection(edge_extract.GetOutputPort())
-        edge_glyph.ScalingOff()
+        
+        edge_mapper = vtk.vtkGlyph3DMapper()
+        edge_mapper.SetInputData(polydata)
+        edge_mapper.SetSourceConnection(edge_extract.GetOutputPort())
+        
         edge_actor = vtk.vtkActor()
-        edge_actor.SetMapper(edge_glyph)
+        edge_actor.SetMapper(edge_mapper)
         edge_actor.GetProperty().SetColor(0.0, 0.0, 0.0)
         edge_actor.GetProperty().SetLineWidth(1.0)
         edge_actor.GetProperty().SetOpacity(1.0)
+        
+        rospy.loginfo("[DEBUG] _build_voxel_actors completed.")
         return actor, edge_actor
 
     def _build_box_actors(self, center, size):
@@ -1004,12 +1105,12 @@ class PcdMapImportWindow(QWidget):
         vtk_points.SetData(numpy_support.numpy_to_vtk(points.astype(np.float32), deep=True))
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(vtk_points)
-        verts = vtk.vtkCellArray()
-        verts.Allocate(points.shape[0])
-        for idx in range(points.shape[0]):
-            verts.InsertNextCell(1)
-            verts.InsertCellPoint(idx)
-        polydata.SetVerts(verts)
+        
+        vg = vtk.vtkVertexGlyphFilter()
+        vg.SetInputData(polydata)
+        vg.Update()
+        polydata = vg.GetOutput()
+        
         z = points[:, 2].astype(np.float32)
         z_min, z_max = float(z.min()), float(z.max())
         t = ((z - z_min) / (z_max - z_min)).reshape(-1, 1) if z_max > z_min else np.zeros((len(z), 1), dtype=np.float32)
@@ -1021,13 +1122,11 @@ class PcdMapImportWindow(QWidget):
         colors[fh] = (1 - t[fh]*2) * low + (t[fh]*2) * mid
         colors[~fh] = (1 - (t[~fh]-0.5)*2) * mid + ((t[~fh]-0.5)*2) * high
         colors = np.clip(colors, 0, 255).astype(np.uint8)
-        vtk_colors = vtk.vtkUnsignedCharArray()
+        
+        vtk_colors = numpy_support.numpy_to_vtk(colors, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
         vtk_colors.SetName("z_color")
-        vtk_colors.SetNumberOfComponents(3)
-        vtk_colors.SetNumberOfTuples(len(z))
-        for idx, c in enumerate(colors):
-            vtk_colors.SetTuple3(idx, int(c[0]), int(c[1]), int(c[2]))
         polydata.GetPointData().SetScalars(vtk_colors)
+        
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputData(polydata)
         mapper.SetScalarModeToUsePointData()
@@ -1090,6 +1189,7 @@ class PcdMapImportWindow(QWidget):
         self._layer_data.clear()
 
     def _refresh_layers(self, checked=None) -> None:
+        rospy.loginfo("[DEBUG] _refresh_layers started.")
         self._clear_octomap_actors()
         visibility = {
             "occupied":    self.occupied_checkbox.isChecked(),
@@ -1104,11 +1204,13 @@ class PcdMapImportWindow(QWidget):
                 points, scale, intensity = self._layer_data[layer_name]
                 if points.size == 0:
                     continue
+                rospy.loginfo(f"[DEBUG] Building risk actors. Points count: {points.shape[0]}")
                 actor, edge_actor = self._build_risk_actors(points, scale, intensity)
             else:
                 points, scale, color, opacity = self._layer_data[layer_name]
                 if points.size == 0:
                     continue
+                rospy.loginfo(f"[DEBUG] Building voxel actors for '{layer_name}'. Points count: {points.shape[0]}")
                 actor, edge_actor = self._build_voxel_actors(points, scale, color, opacity)
             self._octomap_renderer.AddActor(actor)
             if edge_actor is not None:
@@ -1117,7 +1219,9 @@ class PcdMapImportWindow(QWidget):
         if self._octomap_camera_needs_reset:
             self._octomap_renderer.ResetCamera()
             self._octomap_camera_needs_reset = False
+        rospy.loginfo("[DEBUG] Calling Render on octomap_vtk_widget...")
         self.octomap_vtk_widget.GetRenderWindow().Render()
+        rospy.loginfo("[DEBUG] Render on octomap_vtk_widget completed.")
 
     def _toggle_path_visibility(self, checked: bool) -> None:
         if checked:
@@ -1202,15 +1306,16 @@ class PcdMapImportWindow(QWidget):
         cube.SetXLength(float(scale[0]))
         cube.SetYLength(float(scale[1]))
         cube.SetZLength(float(scale[2]))
-        glyph = vtk.vtkGlyph3DMapper()
-        glyph.SetInputData(polydata)
-        glyph.SetSourceConnection(cube.GetOutputPort())
-        glyph.ScalingOff()
-        glyph.SetScalarModeToUsePointData()
-        glyph.ScalarVisibilityOn()
-        glyph.SetColorModeToDirectScalars()
+        
+        mapper = vtk.vtkGlyph3DMapper()
+        mapper.SetInputData(polydata)
+        mapper.SetSourceConnection(cube.GetOutputPort())
+        mapper.SetScalarModeToUsePointData()
+        mapper.ScalarVisibilityOn()
+        mapper.SetColorModeToDirectScalars()
+        
         actor = vtk.vtkActor()
-        actor.SetMapper(glyph)
+        actor.SetMapper(mapper)
         actor.GetProperty().SetOpacity(1.0)
         actor.GetProperty().SetInterpolationToFlat()
         return actor, None

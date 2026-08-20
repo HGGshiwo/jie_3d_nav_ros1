@@ -125,6 +125,7 @@ catkin_install_python(PROGRAMS
   scripts/map_package_manager
   scripts/map_save_gui
   scripts/map_viewer_gui
+  scripts/map_viewer_server
   scripts/ros_map_import_gui
   scripts/pcd_map_import_gui
   scripts/open3d_octomap_viewer.py
