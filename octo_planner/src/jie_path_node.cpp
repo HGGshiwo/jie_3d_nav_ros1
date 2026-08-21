@@ -120,6 +120,8 @@ public:
     pnh_.param<bool>("strict_direct_ground_support", strict_direct_ground_support_, true);
     pnh_.param<int>("ground_support_xy_radius_cells", ground_support_xy_radius_cells_, 1);
     pnh_.param<int>("ground_support_depth_cells", ground_support_depth_cells_, 2);
+    pnh_.param<int>("max_step_height_cells", max_step_height_cells_, 1);
+    pnh_.param<int>("robot_clearance_height_cells", robot_clearance_height_cells_, 0);
     pnh_.param<bool>("enable_preblocked_costmap", enable_preblocked_costmap_, true);
     pnh_.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells_, 3);
     pnh_.param<double>("preblocked_costmap_weight", preblocked_costmap_weight_, 1.5);
@@ -659,7 +661,7 @@ private:
 
     for (int dx = -n; dx <= n; ++dx)
       for (int dy = -n; dy <= n; ++dy)
-        for (int dz = 0; dz <= n; ++dz) {
+        for (int dz = robot_clearance_height_cells_; dz <= n; ++dz) {
           const double dist_sq =
             (dx * r) * (dx * r) + (dy * r) * (dy * r) + (dz * r) * (dz * r);
           if (dist_sq > radius_sq) continue;
@@ -700,13 +702,13 @@ private:
     return false;
   }
 
-  std::vector<GridIndex> make26Directions() const
+  std::vector<GridIndex> makeDirections() const
   {
     std::vector<GridIndex> dirs;
-    dirs.reserve(26);
+    dirs.reserve(9 * (2 * max_step_height_cells_ + 1) - 1);
     for (int dx = -1; dx <= 1; ++dx)
       for (int dy = -1; dy <= 1; ++dy)
-        for (int dz = -1; dz <= 1; ++dz) {
+        for (int dz = -max_step_height_cells_; dz <= max_step_height_cells_; ++dz) {
           if (dx == 0 && dy == 0 && dz == 0) continue;
           dirs.push_back(GridIndex{dx, dy, dz});
         }
@@ -767,7 +769,7 @@ private:
 
     g_score[start] = 0.0;
     open_set.push(QueueNode{start, euclidean(start, goal), 0.0});
-    const std::vector<GridIndex> directions = make26Directions();
+    const std::vector<GridIndex> directions = makeDirections();
     int iters = 0;
 
     while (!open_set.empty() && iters < max_iterations_) {
@@ -931,6 +933,7 @@ private:
   int max_iterations_, snap_search_radius_cells_;
   bool require_ground_support_, strict_direct_ground_support_;
   int ground_support_xy_radius_cells_, ground_support_depth_cells_;
+  int max_step_height_cells_, robot_clearance_height_cells_;
   bool enable_preblocked_costmap_;
   int preblocked_costmap_radius_cells_;
   double preblocked_costmap_weight_;

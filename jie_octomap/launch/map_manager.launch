@@ -22,11 +22,13 @@
         <param name="require_ground_support" value="true"/>
         <param name="strict_direct_ground_support" value="false"/>
         <param name="ground_support_xy_radius_cells" value="1"/>
-        <param name="ground_support_depth_cells" value="1"/>
+        <param name="ground_support_depth_cells" value="3"/>
         <param name="enable_preblocked_costmap" value="true"/>
         <param name="preblocked_costmap_radius_cells" value="3"/>
         <param name="preblocked_costmap_weight" value="2.5"/>
         <param name="lowest_traversable_only" value="true"/>
+        <param name="max_step_height_cells" value="3"/>
+        <param name="robot_clearance_height_cells" value="3"/>
     </node>
 
     <!-- map_package_manager -->

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { initScene } from './scene.js';
+import { LayerManager } from './layer.js';
 
 // ---- 0. 编辑状态与地图版本控制 ----
 let isDirty = false;
@@ -9,30 +10,18 @@ let serverOccupiedVersion = 0;
 
 // ---- 1. 场景初始化 ----
 const container = document.getElementById('canvas-container');
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1a1a1a);
+const { scene, camera, renderer, controls, editPlane } = initScene(container);
 
-// Z轴向上的相机设置
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
-camera.position.set(0, -25, 25);
-camera.up.set(0, 0, 1);
-
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-container.appendChild(renderer.domElement);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-// 视角控制键配置：
-// - 左键：旋转（仅在非绘图状态或视角工具下生效）
-// - 中键：平移（任何状态下均可使用）
-// - 右键：旋转（任何状态下均可使用，方便绘图时随时微调视角）
-controls.mouseButtons = {
-    LEFT: THREE.MOUSE.ROTATE,
-    MIDDLE: THREE.MOUSE.PAN,
-    RIGHT: THREE.MOUSE.ROTATE
+// ---- 2. 高性能体素管理系统 ----
+// 容器 (默认分辨率初始化为 0.4)
+let layers = {
+    occupied: new LayerManager(scene, "occupied", [0.4, 0.4, 0.4]),
+    preblocked: new LayerManager(scene, "preblocked", [0.4, 0.4, 0.4]),
+    traversable: new LayerManager(scene, "traversable", [0.4, 0.4, 0.4]),
+    risk_cost: new LayerManager(scene, "risk_cost", [0.4, 0.4, 0.4])
 };
-controls.minDistance = 1.0; // 限制最小缩放距离，防止穿过中心点导致消失
-controls.maxDistance = 500.0; // 限制最大缩放距离
+layers.traversable.mesh.visible = false;
+layers.risk_cost.mesh.visible = false;
 
 // 监听复选框，切换图层显隐
 document.getElementById('show-occupied').addEventListener('change', (e) => {
@@ -41,140 +30,12 @@ document.getElementById('show-occupied').addEventListener('change', (e) => {
 document.getElementById('show-preblocked').addEventListener('change', (e) => {
     layers.preblocked.mesh.visible = e.target.checked;
 });
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
-dirLight.position.set(10, 10, 20);
-scene.add(dirLight);
-
-// 辅助网格
-const gridHelper = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
-gridHelper.rotation.x = Math.PI / 2;
-scene.add(gridHelper);
-
-// 编辑参考平面 (不可见，用于接收鼠标射线检测)
-const planeGeo = new THREE.PlaneGeometry(1000, 1000);
-const planeMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
-const editPlane = new THREE.Mesh(planeGeo, planeMat);
-scene.add(editPlane);
-
-// ---- 2. 高性能体素管理系统 ----
-const MAX_INSTANCES = 500000; 
-const LAYER_COLORS = {
-    "occupied": 0xf27327, // 橙色
-    "preblocked": 0xff0000, // 红色
-    "traversable": 0x00ff00  // 绿色 (仅显示，通常不手绘)
-};
-
-class LayerManager {
-    constructor(layerName, scale) {
-        this.layerName = layerName;
-        this.scale = scale; // [x, y, z]
-        this.voxelMap = new Map(); // key: "x,y,z", value: {x,y,z}
-        this.voxelList = []; // 新建缓存扁平数组，供 O(1) 快速查询击中体素用
-        
-        // 创建 1x1x1 的单位几何体，并在渲染实例时动态应用 scale
-        const geometry = new THREE.BoxGeometry(0.95, 0.95, 0.95);
-        
-        // 关键修复：给 base geometry 赋予极大的包围盒和包围球，
-        // 绕过 Three.js 默认仅以原点几何体尺寸 (0.82m) 进行射线交点早期过滤的机制。
-        // 这能确保偏离原点位置的体素实例也能够正常被射线射中并高亮/擦除。
-        geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 99999);
-        geometry.boundingBox = new THREE.Box3(new THREE.Vector3(-99999, -99999, -99999), new THREE.Vector3(99999, 99999, 99999));
-        
-        const material = new THREE.MeshLambertMaterial({ color: LAYER_COLORS[layerName] || 0xffffff });
-        
-        // 使用 InstancedMesh 渲染，性能极致
-        this.mesh = new THREE.InstancedMesh(geometry, material, MAX_INSTANCES);
-        this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        this.mesh.count = 0;
-        
-        // 关键修复：设置 InstancedMesh 本身的包围球与包围盒。
-        // Three.js 在对 InstancedMesh 求交时会缓存并使用此处的包围球，
-        // 如果最初为 null，它会计算出空的包围球并缓存。后续添加体素后该缓存不会自动刷新，
-        // 从而导致所有后续射线求交由于 intersectsSphere 失败而直接返回 0。
-        this.mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 99999);
-        this.mesh.boundingBox = new THREE.Box3(new THREE.Vector3(-99999, -99999, -99999), new THREE.Vector3(99999, 99999, 99999));
-        
-        scene.add(this.mesh);
-        
-        this.dummy = new THREE.Object3D();
-    }
-
-    hash(x, y, z) {
-        // 防止浮点数精度问题
-        return `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
-    }
-
-    addVoxel(x, y, z) {
-        const key = this.hash(x, y, z);
-        if (!this.voxelMap.has(key) && this.voxelMap.size < MAX_INSTANCES) {
-            this.voxelMap.set(key, {x, y, z});
-            this.updateInstancedMesh();
-            isDirty = true; // 产生了本地编辑修改，标记为脏状态
-            if (this.layerName === 'preblocked') {
-                isPreblockedDirty = true;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    removeVoxel(x, y, z) {
-        const key = this.hash(x, y, z);
-        if (this.voxelMap.has(key)) {
-            this.voxelMap.delete(key);
-            this.updateInstancedMesh();
-            isDirty = true; // 产生了本地编辑修改，标记为脏状态
-            if (this.layerName === 'preblocked') {
-                isPreblockedDirty = true;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    updateInstancedMesh() {
-        let i = 0;
-        this.voxelList = []; // 每次更新时同步构建扁平数组
-        this.voxelMap.forEach((pos) => {
-            this.voxelList.push(pos);
-            if (i < MAX_INSTANCES) {
-                this.dummy.position.set(pos.x, pos.y, pos.z);
-                this.dummy.scale.set(this.scale[0], this.scale[1], this.scale[2]);
-                this.dummy.updateMatrix();
-                this.mesh.setMatrixAt(i++, this.dummy.matrix);
-            }
-        });
-        this.mesh.count = Math.min(this.voxelMap.size, MAX_INSTANCES);
-        this.mesh.instanceMatrix.needsUpdate = true;
-    }
-
-    loadFromArray(points, scale) {
-        if (scale) {
-            this.scale = scale;
-        }
-        this.voxelMap.clear();
-        points.forEach(pt => {
-            this.voxelMap.set(this.hash(pt[0], pt[1], pt[2]), {x: pt[0], y: pt[1], z: pt[2]});
-        });
-        this.updateInstancedMesh();
-    }
-    
-    getArray() {
-        return this.voxelList.map(p => [p.x, p.y, p.z]);
-    }
-    
-    getVoxelByInstanceId(instanceId) {
-        return this.voxelList[instanceId];
-    }
-}
-
-// 容器 (默认分辨率初始化为 0.4)
-let layers = {
-    occupied: new LayerManager("occupied", [0.4, 0.4, 0.4]),
-    preblocked: new LayerManager("preblocked", [0.4, 0.4, 0.4])
-};
+document.getElementById('show-traversable').addEventListener('change', (e) => {
+    layers.traversable.mesh.visible = e.target.checked;
+});
+document.getElementById('show-risk-cost').addEventListener('change', (e) => {
+    layers.risk_cost.mesh.visible = e.target.checked;
+});
 
 // ---- 3. 编辑交互逻辑 ----
 const raycaster = new THREE.Raycaster();
@@ -293,15 +154,20 @@ function executePaint() {
             const cy = activeHit.voxel.y;
             const cz = activeHit.voxel.z;
             const half = (params.size - 1) / 2;
-            const hitLayer = layers[activeHit.layerName];
             
             for (let dx = -half; dx <= half; dx++) {
                 for (let dy = -half; dy <= half; dy++) {
                     const px = cx + dx * activeHit.scale[0];
                     const py = cy + dy * activeHit.scale[1];
                     // 同时擦除占据层（橙色）和禁行层（红色），避免单独残留导致C++端根据另一层重新计算恢复
-                    layers.occupied.removeVoxel(px, py, cz);
-                    layers.preblocked.removeVoxel(px, py, cz);
+                    const removedOcc = layers.occupied.removeVoxel(px, py, cz);
+                    const removedPre = layers.preblocked.removeVoxel(px, py, cz);
+                    if (removedOcc || removedPre) {
+                        isDirty = true;
+                        if (removedPre) {
+                            isPreblockedDirty = true;
+                        }
+                    }
                 }
             }
             activeHit = getInteractionTarget();
@@ -324,7 +190,12 @@ function executePaint() {
             for (let dy = -half; dy <= half; dy++) {
                 const px = cx + dx * scale[0];
                 const py = cy + dy * scale[1];
-                targetLayer.addVoxel(px, py, cz);
+                if (targetLayer.addVoxel(px, py, cz)) {
+                    isDirty = true;
+                    if (params.layer === 'preblocked') {
+                        isPreblockedDirty = true;
+                    }
+                }
             }
         }
         activeHit = getInteractionTarget();
@@ -375,16 +246,29 @@ function updateCursorVisual() {
     }
 }
 
-// ---- 3.1 键盘空格键快捷切视角 ----
+// ---- 3.1 键盘控制与快捷切视角 ----
+const keysPressed = {};
 let isSpacePressed = false;
+
+function isInputFocused() {
+    const el = document.activeElement;
+    return el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA');
+}
+
 window.addEventListener('keydown', (e) => {
+    if (isInputFocused()) return;
+    keysPressed[e.code] = true;
+    
     if (e.code === 'Space') {
         isSpacePressed = true;
         document.body.style.cursor = 'grab';
         cursor.visible = false;
     }
 });
+
 window.addEventListener('keyup', (e) => {
+    keysPressed[e.code] = false;
+    
     if (e.code === 'Space') {
         isSpacePressed = false;
         document.body.style.cursor = 'default';
@@ -612,13 +496,17 @@ async function reloadMapFromServer(silent = false) {
         // 恢复数据（传入对应的地图分辨率尺度）
         if (data.layers.occupied) layers.occupied.loadFromArray(data.layers.occupied.points, data.layers.occupied.scale);
         if (data.layers.preblocked) layers.preblocked.loadFromArray(data.layers.preblocked.points, data.layers.preblocked.scale);
+        if (data.layers.traversable) layers.traversable.loadFromArray(data.layers.traversable.points, data.layers.traversable.scale);
+        if (data.layers.risk_cost) layers.risk_cost.loadFromArray(data.layers.risk_cost.points, data.layers.risk_cost.scale, data.layers.risk_cost.intensities);
         
         const sizeOcc = data.layers.occupied ? data.layers.occupied.points.length : 0;
         const sizePre = data.layers.preblocked ? data.layers.preblocked.points.length : 0;
-        console.log("【地图重载成功】数据量：占据(橙):", sizeOcc, "禁行(红):", sizePre);
+        const sizeTrav = data.layers.traversable ? data.layers.traversable.points.length : 0;
+        const sizeRisk = data.layers.risk_cost ? data.layers.risk_cost.points.length : 0;
+        console.log("【地图重载成功】数据量：占据(橙):", sizeOcc, "禁行(红):", sizePre, "可通行(绿):", sizeTrav, "通行代价(渐变):", sizeRisk);
         
         if (!silent) {
-            statusEl.innerText = `加载成功! 占据: ${sizeOcc}, 禁行: ${sizePre}`;
+            statusEl.innerText = `加载成功! 占据: ${sizeOcc}, 禁行: ${sizePre}, 可通行: ${sizeTrav}, 代价点数: ${sizeRisk}`;
         }
         
         // 同步当前的服务器地图版本号，防止拉取完立即又检测出变化
@@ -715,16 +603,58 @@ document.getElementById('btn-view-top').addEventListener('click', () => setView(
 document.getElementById('btn-view-front').addEventListener('click', () => setView('front'));
 document.getElementById('btn-view-side').addEventListener('click', () => setView('side'));
 
-// 窗口适配
-window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-});
+const moveSpeed = 0.2; // 键盘移动步长 (米)
+
+function handleKeyboardMovement() {
+    if (isInputFocused()) return;
+    
+    // 获取相机的朝向向量
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    
+    // 将朝向向量投影到水平面 (XY 面)，以进行直观的水平面平移
+    forward.z = 0;
+    forward.normalize();
+    
+    // 计算相机的右方向量
+    const right = new THREE.Vector3();
+    right.crossVectors(forward, camera.up).normalize();
+
+    const translation = new THREE.Vector3(0, 0, 0);
+
+    // W/S: 前进/后退
+    if (keysPressed['KeyW'] || keysPressed['ArrowUp']) {
+        translation.addScaledVector(forward, moveSpeed);
+    }
+    if (keysPressed['KeyS'] || keysPressed['ArrowDown']) {
+        translation.addScaledVector(forward, -moveSpeed);
+    }
+    // A/D: 左移/右移
+    if (keysPressed['KeyA'] || keysPressed['ArrowLeft']) {
+        translation.addScaledVector(right, -moveSpeed);
+    }
+    if (keysPressed['KeyD'] || keysPressed['ArrowRight']) {
+        translation.addScaledVector(right, moveSpeed);
+    }
+    // E/Q: 上升/下降 (沿着世界坐标 Z 轴)
+    if (keysPressed['KeyE']) {
+        translation.z += moveSpeed;
+    }
+    if (keysPressed['KeyQ']) {
+        translation.z -= moveSpeed;
+    }
+
+    // 同时平移相机位置和控制器焦点，防止缩放锁死
+    if (translation.lengthSq() > 0) {
+        camera.position.add(translation);
+        controls.target.add(translation);
+    }
+}
 
 // 动画循环
 function animate() {
     requestAnimationFrame(animate);
+    handleKeyboardMovement();
     controls.update();
     renderer.render(scene, camera);
 }

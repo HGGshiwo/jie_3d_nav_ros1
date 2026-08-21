@@ -60,10 +60,12 @@
         <div class="row">
             <span>Z轴平面 (m):</span> <input type="number" id="edit-z" value="0.0" step="0.2">
         </div>
-        <div class="row" style="display: flex; gap: 15px; justify-content: flex-start;">
+        <div class="row" style="display: flex; gap: 10px; justify-content: flex-start; flex-wrap: wrap;">
             <span>图层显隐:</span>
             <label><input type="checkbox" id="show-occupied" checked> 占据(橙)</label>
             <label><input type="checkbox" id="show-preblocked" checked> 禁行(红)</label>
+            <label><input type="checkbox" id="show-traversable"> 可通行(绿)</label>
+            <label><input type="checkbox" id="show-risk-cost"> 通行代价(渐变)</label>
         </div>
         <hr>
         <h3>视角调整</h3>

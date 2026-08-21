@@ -17,6 +17,8 @@ import tf2_ros
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, PointStamped, PoseStamped
 from nav_msgs.msg import Path as ROSPath
+from sensor_msgs.msg import PointCloud2, PointField
+import sensor_msgs.point_cloud2 as pc2
 import time
 from jie_map_msgs.srv import LoadNavigationMapPackage, LoadNavigationMapPackageRequest, SaveNavigationMapPackage, SaveNavigationMapPackageRequest
 
@@ -52,7 +54,8 @@ class SaveMapRequest(BaseModel):
 latest_ros_data = {
     "occupied": None,
     "preblocked": None,
-    "traversable": None
+    "traversable": None,
+    "risk_cost": None
 }
 # 全局存储最新规划好的路径点
 latest_planned_path = []
@@ -93,6 +96,31 @@ def traversable_callback(msg):
         latest_ros_data["traversable"] = {"points": pts, "scale": scale, "stamp": msg.header.stamp}
         print(f"[traversable_callback] Received traversable marker. Points={len(pts)} Stamp={msg.header.stamp.to_sec()}", flush=True)
 
+def risk_cost_callback(msg):
+    try:
+        if hasattr(msg, 'point_step') and msg.point_step == 16:
+            # Quick numpy parsing for FLOAT32 PointCloud2 fields (x, y, z, intensity)
+            data_arr = np.frombuffer(msg.data, dtype=np.float32).reshape(-1, 4)
+            risk_arr = data_arr[~np.isnan(data_arr).any(axis=1)]
+        else:
+            # Fallback to sensor_msgs.point_cloud2 generator
+            risk_records = list(pc2.read_points(
+                msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
+            risk_arr = (np.array([[r[0], r[1], r[2], r[3]] for r in risk_records], dtype=np.float32)
+                        if risk_records else np.empty((0, 4), dtype=np.float32))
+        
+        pts = risk_arr[:, :3].tolist()
+        intensities = risk_arr[:, 3].tolist()
+        
+        latest_ros_data["risk_cost"] = {
+            "points": pts,
+            "intensities": intensities,
+            "stamp": msg.header.stamp
+        }
+        print(f"[risk_cost_callback] Received risk cost cloud. Points={len(pts)} Stamp={msg.header.stamp.to_sec()}", flush=True)
+    except Exception as e:
+        print(f"[risk_cost_callback] Error parsing PointCloud2: {e}")
+
 # TF 监听全局变量
 tf_buffer = None
 tf_listener = None
@@ -118,6 +146,7 @@ def startup_event():
         rospy.Subscriber("/octomap_occupied_markers", Marker, occupied_callback)
         rospy.Subscriber("/preblocked_cells_markers", Marker, preblocked_callback)
         rospy.Subscriber("/traversable_cells_markers", Marker, traversable_callback)
+        rospy.Subscriber("/risk_cost_cells", PointCloud2, risk_cost_callback)
         rospy.Subscriber("/planned_path", ROSPath, path_callback)
         print("ROS 节点已启动，订阅者、发布者与 TF 监听器就绪")
     except Exception as e:
@@ -232,6 +261,12 @@ async def load_map(req: MapDataRequest):
                 "points": latest_ros_data["traversable"]["points"],
                 "scale": latest_ros_data["traversable"]["scale"]
             }
+        if latest_ros_data["risk_cost"] is not None:
+            response_data["layers"]["risk_cost"] = {
+                "points": latest_ros_data["risk_cost"]["points"],
+                "intensities": latest_ros_data["risk_cost"]["intensities"],
+                "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
+            }
 
         # Fallback: 如果没有通过 ROS 话题收到 occupied（或 ROS 未开启），直接读取 NPZ 文件作为保底
         if "occupied" not in response_data["layers"] or not response_data["layers"]["occupied"]:
@@ -247,6 +282,13 @@ async def load_map(req: MapDataRequest):
                             "points": layers_data[pts_key].tolist(),
                             "scale": layers_data[sc_key].tolist() if sc_key in layers_data else [0.2, 0.2, 0.2]
                         }
+                if "risk_points" in layers_data and "risk_intensity" in layers_data and "risk_cost" not in response_data["layers"]:
+                    scale = layers_data["preblocked_scale"].tolist() if "preblocked_scale" in layers_data else [0.2, 0.2, 0.2]
+                    response_data["layers"]["risk_cost"] = {
+                        "points": layers_data["risk_points"].tolist(),
+                        "intensities": layers_data["risk_intensity"].tolist(),
+                        "scale": scale
+                    }
         
         return JSONResponse(content=response_data)
     except Exception as e:
@@ -533,12 +575,14 @@ async def get_current_map():
     occ_stamp = latest_ros_data["occupied"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["occupied"] else 0.0
     pre_stamp = latest_ros_data["preblocked"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["preblocked"] else 0.0
     tra_stamp = latest_ros_data["traversable"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["traversable"] else 0.0
+    risk_stamp = latest_ros_data["risk_cost"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["risk_cost"] else 0.0
     
     occ_len = len(latest_ros_data["occupied"]["points"]) if latest_ros_data["occupied"] else 0
     pre_len = len(latest_ros_data["preblocked"]["points"]) if latest_ros_data["preblocked"] else 0
     tra_len = len(latest_ros_data["traversable"]["points"]) if latest_ros_data["traversable"] else 0
+    risk_len = len(latest_ros_data["risk_cost"]["points"]) if latest_ros_data["risk_cost"] else 0
 
-    print(f"[get_current_map] Request received. occupied(len={occ_len}, stamp={occ_stamp}), preblocked(len={pre_len}, stamp={pre_stamp}), traversable(len={tra_len}, stamp={tra_stamp})", flush=True)
+    print(f"[get_current_map] Request received. occupied(len={occ_len}, stamp={occ_stamp}), preblocked(len={pre_len}, stamp={pre_stamp}), traversable(len={tra_len}, stamp={tra_stamp}), risk_cost(len={risk_len}, stamp={risk_stamp})", flush=True)
 
     response_layers = {}
     if latest_ros_data["occupied"] is not None:
@@ -555,6 +599,12 @@ async def get_current_map():
         response_layers["traversable"] = {
             "points": latest_ros_data["traversable"]["points"],
             "scale": latest_ros_data["traversable"]["scale"]
+        }
+    if latest_ros_data["risk_cost"] is not None:
+        response_layers["risk_cost"] = {
+            "points": latest_ros_data["risk_cost"]["points"],
+            "intensities": latest_ros_data["risk_cost"]["intensities"],
+            "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
         }
     return JSONResponse(content={"layers": response_layers})
 
