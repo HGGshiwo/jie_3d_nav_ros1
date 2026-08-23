@@ -2,6 +2,8 @@
 #define OCTO_PLANNER_CORE_H
 
 #include <vector>
+#include <atomic>
+#include <mutex>
 #include <unordered_set>
 #include <unordered_map>
 #include <memory>
@@ -57,6 +59,25 @@ struct QueueNodeCompare
   }
 };
 
+struct CellDebugDetails
+{
+  int grid_x = 0;
+  int grid_y = 0;
+  int grid_z = 0;
+  bool is_occupied = false;
+  bool is_unknown = false;
+  bool has_ground_support = false;
+  bool is_preblocked = false;
+  std::string preblocked_reason = "none";
+  bool has_vertical_collision = false;
+  bool has_horizontal_collision = false;
+  bool has_below_preblocked_failure = false;
+  double preblocked_cost = 0.0;
+  double risk_cost = 0.0;
+  bool is_candidate = false;
+  bool is_traversable = false;
+};
+
 class OctoPlannerCore
 {
 public:
@@ -67,6 +88,8 @@ public:
   void setRobotRadius(double r) { robot_radius_ = r; }
   void setMaxIterations(int val) { max_iterations_ = val; }
   void setSnapSearchRadiusCells(int val) { snap_search_radius_cells_ = val; }
+  void setCancelFlag(bool val) { cancel_ = val; }
+  bool isCancelled() const { return cancel_; }
   void setRequireGroundSupport(bool val) { require_ground_support_ = val; }
   void setStrictDirectGroundSupport(bool val) { strict_direct_ground_support_ = val; }
   void setGroundSupportXYRadiusCells(int val) { ground_support_xy_radius_cells_ = val; }
@@ -80,11 +103,17 @@ public:
 
   // Octomap management
   bool setOctree(const std::shared_ptr<octomap::OcTree>& octree);
-  std::shared_ptr<octomap::OcTree> getOctree() const { return octree_; }
+  std::shared_ptr<octomap::OcTree> getOctree() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return octree_;
+  }
 
   // External constraints
   void setExternalPreblockedCells(const std::unordered_set<GridIndex, GridIndexHash>& cells);
-  void clearExternalPreblockedCells() { external_preblocked_cells_.clear(); }
+  void clearExternalPreblockedCells() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    external_preblocked_cells_.clear();
+  }
 
   // Layer rebuilds
   void rebuildPreblockedCells();
@@ -93,10 +122,22 @@ public:
   void rebuildAllLayers();
 
   // Getters for layers
-  const std::unordered_set<GridIndex, GridIndexHash>& getPreblockedCells() const { return preblocked_cells_; }
-  const std::unordered_set<GridIndex, GridIndexHash>& getExternalPreblockedCells() const { return external_preblocked_cells_; }
-  const std::unordered_set<GridIndex, GridIndexHash>& getTraversableCells() const { return traversable_cells_; }
-  const std::unordered_map<GridIndex, double, GridIndexHash>& getPreblockedCostmap() const { return preblocked_costmap_; }
+  std::unordered_set<GridIndex, GridIndexHash> getPreblockedCells() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return preblocked_cells_;
+  }
+  std::unordered_set<GridIndex, GridIndexHash> getExternalPreblockedCells() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return external_preblocked_cells_;
+  }
+  std::unordered_set<GridIndex, GridIndexHash> getTraversableCells() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return traversable_cells_;
+  }
+  std::unordered_map<GridIndex, double, GridIndexHash> getPreblockedCostmap() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return preblocked_costmap_;
+  }
 
   // Coordinates converters
   GridIndex worldToGrid(double x, double y, double z) const;
@@ -113,6 +154,7 @@ public:
                         bool require_ground_support, bool strict, int xy_r, int depth) const;
   bool findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
                            bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const;
+  bool queryCellDebugInfo(const GridIndex & idx, CellDebugDetails & details) const;
 
 private:
   double euclidean(const GridIndex & a, const GridIndex & b) const;
@@ -123,6 +165,7 @@ private:
   bool hasSameLevelNeighborWithOccupiedAbove(const GridIndex & idx) const;
   double getPreblockedCost(const GridIndex & idx) const;
   std::vector<GridIndex> makeDirections() const;
+  std::string getPreblockedReason(const GridIndex & idx) const;
 
   // Parameters
   double robot_radius_;
@@ -143,9 +186,12 @@ private:
   std::shared_ptr<octomap::OcTree> octree_;
   GridIndex min_idx_, max_idx_;
   std::unordered_set<GridIndex, GridIndexHash> traversable_cells_;
+  std::unordered_set<GridIndex, GridIndexHash> candidates_;
   std::unordered_set<GridIndex, GridIndexHash> preblocked_cells_;
   std::unordered_set<GridIndex, GridIndexHash> external_preblocked_cells_;
   std::unordered_map<GridIndex, double, GridIndexHash> preblocked_costmap_;
+  std::atomic<bool> cancel_;
+  mutable std::recursive_mutex mutex_;
 };
 
 } // namespace octo_planner

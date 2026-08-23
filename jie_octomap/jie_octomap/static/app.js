@@ -8,9 +8,34 @@ let isPreblockedDirty = false;
 let serverPreblockedVersion = 0;
 let serverOccupiedVersion = 0;
 
+// 全局 DOM 节点缓存，防止 TDZ（暂存死区）及高频 DOM 查询导致的卡顿
+const statusEl = document.getElementById('status');
+const rootPathInput = document.getElementById('root-path');
+const mapNameInput = document.getElementById('map-name');
+const brushSizeInput = document.getElementById('brush-size');
+const editZInput = document.getElementById('edit-z');
+const editLayerSelect = document.getElementById('edit-layer');
+const debugPanelDiv = document.getElementById('debug-panel');
+const btnCopyDebug = document.getElementById('btn-copy-debug');
+
+// 全局参数缓存
+let currentTool = 'view';
+let currentLayer = 'occupied';
+let brushSize = 1;
+let zHeight = 0.0;
+let latestDebugData = null;
+
+// 从 HTML 默认状态初始化缓存参数
+if (brushSizeInput) brushSize = parseInt(brushSizeInput.value) || 1;
+if (editZInput) zHeight = parseFloat(editZInput.value) || 0.0;
+if (editLayerSelect) currentLayer = editLayerSelect.value;
+const checkedTool = document.querySelector('input[name="tool"]:checked');
+if (checkedTool) currentTool = checkedTool.value;
+
 // ---- 1. 场景初始化 ----
 const container = document.getElementById('canvas-container');
 const { scene, camera, renderer, controls, editPlane } = initScene(container);
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
 
 // ---- 2. 高性能体素管理系统 ----
 // 容器 (默认分辨率初始化为 0.4)
@@ -48,19 +73,56 @@ const cursorMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true
 const cursor = new THREE.Mesh(cursorGeo, cursorMat);
 scene.add(cursor);
 
+// 重构后的参数获取函数，直接读取内存缓存，耗时为 0ms
 function getBrushParams() {
     return {
-        tool: document.querySelector('input[name="tool"]:checked').value,
-        layer: document.getElementById('edit-layer').value,
-        size: parseInt(document.getElementById('brush-size').value),
-        zHeight: parseFloat(document.getElementById('edit-z').value)
+        tool: currentTool,
+        layer: currentLayer,
+        size: brushSize,
+        zHeight: zHeight
     };
 }
 
-// 同步检测平面的高度
-document.getElementById('edit-z').addEventListener('change', (e) => {
-    editPlane.position.z = parseFloat(e.target.value);
+// 绑定事件以更新参数缓存
+document.querySelectorAll('input[name="tool"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+        currentTool = e.target.value;
+        if (debugPanelDiv) {
+            if (currentTool === 'debug') {
+                debugPanelDiv.style.display = 'block';
+            } else {
+                debugPanelDiv.style.display = 'none';
+            }
+        }
+    });
 });
+
+if (editLayerSelect) {
+    editLayerSelect.addEventListener('change', (e) => {
+        currentLayer = e.target.value;
+    });
+}
+
+if (brushSizeInput) {
+    brushSizeInput.addEventListener('input', (e) => {
+        brushSize = parseInt(e.target.value) || 1;
+    });
+}
+
+if (editZInput) {
+    editZInput.addEventListener('input', (e) => {
+        zHeight = parseFloat(e.target.value) || 0.0;
+        if (editPlane) {
+            editPlane.position.z = zHeight;
+        }
+    });
+    editZInput.addEventListener('change', (e) => {
+        zHeight = parseFloat(e.target.value) || 0.0;
+        if (editPlane) {
+            editPlane.position.z = zHeight;
+        }
+    });
+}
 
 let activeHit = null; // 存储当前鼠标射线击中的目标
 
@@ -222,6 +284,21 @@ function updateCursorVisual() {
         return;
     }
 
+    if (params.tool === 'debug') {
+        cursor.material.color.setHex(0x2196F3); // 蓝色高亮表示调试选中
+        if (activeHit.type === 'voxel') {
+            const newX = activeHit.voxel.x + activeHit.normal.x * activeHit.scale[0];
+            const newY = activeHit.voxel.y + activeHit.normal.y * activeHit.scale[1];
+            const newZ = activeHit.voxel.z + activeHit.normal.z * activeHit.scale[2];
+            cursor.position.set(newX, newY, newZ);
+            cursor.scale.set(activeHit.scale[0] * 0.98, activeHit.scale[1] * 0.98, activeHit.scale[2] * 1.02);
+        } else if (activeHit.type === 'plane') {
+            cursor.position.set(activeHit.position.x, activeHit.position.y, activeHit.position.z);
+            cursor.scale.set(activeHit.scale[0] * 0.98, activeHit.scale[1] * 0.98, activeHit.scale[2] * 1.02);
+        }
+        return;
+    }
+
     if (params.tool === 'eraser') {
         if (activeHit.type === 'voxel') {
             cursor.position.set(activeHit.voxel.x, activeHit.voxel.y, activeHit.voxel.z);
@@ -249,6 +326,20 @@ function updateCursorVisual() {
 // ---- 3.1 键盘控制与快捷切视角 ----
 const keysPressed = {};
 let isSpacePressed = false;
+
+// 第一人称（MC视角）拖动控制变量
+let cameraPitch = 0;
+let cameraYaw = 0;
+let isFPDragging = false;
+let prevMouseX = 0;
+let prevMouseY = 0;
+
+function syncPitchYawFromCamera() {
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    cameraYaw = Math.atan2(dir.y, dir.x);
+    const xyLen = Math.sqrt(dir.x * dir.x + dir.y * dir.y);
+    cameraPitch = Math.atan2(dir.z, xyLen);
+}
 
 function isInputFocused() {
     const el = document.activeElement;
@@ -364,26 +455,62 @@ setInterval(async () => {
     }
 }, 1000);
 
-// 页面加载时自动获取后端默认的地图配置并加载，避免手动重新输入
+// 页面加载时自动获取先前缓存的地图配置或默认配置并加载，避免手动重新输入
 async function initDefaultMap() {
-    try {
-        const res = await fetch('/api/default_map');
-        if (res.ok) {
-            const data = await res.json();
-            if (data.root_path && data.map_name) {
-                document.getElementById('root-path').value = data.root_path;
-                document.getElementById('map-name').value = data.map_name;
-                await reloadMapFromServer(false);
+    const cachedRoot = localStorage.getItem('map_root_path');
+    const cachedName = localStorage.getItem('map_name');
+    
+    if (cachedRoot && cachedName) {
+        document.getElementById('root-path').value = cachedRoot;
+        document.getElementById('map-name').value = cachedName;
+        console.log("【本地缓存】成功恢复上次加载的地图:", cachedRoot, cachedName);
+        await reloadMapFromServer(false);
+    } else {
+        try {
+            const res = await fetch('/api/default_map');
+            if (res.ok) {
+                const data = await res.json();
+                if (data.root_path && data.map_name) {
+                    document.getElementById('root-path').value = data.root_path;
+                    document.getElementById('map-name').value = data.map_name;
+                    await reloadMapFromServer(false);
+                }
             }
+        } catch (err) {
+            console.error("Failed to load default map config:", err);
         }
-    } catch (err) {
-        console.error("Failed to load default map config:", err);
     }
 }
 initDefaultMap();
 
 let lastMoveTime = 0;
 window.addEventListener('pointermove', (event) => {
+    if (isFPDragging) {
+        const deltaX = event.clientX - prevMouseX;
+        const deltaY = event.clientY - prevMouseY;
+        prevMouseX = event.clientX;
+        prevMouseY = event.clientY;
+
+        const sensitivity = 0.0035;
+        cameraYaw -= deltaX * sensitivity;
+        cameraPitch -= deltaY * sensitivity;
+
+        // Clamp pitch to avoid upside-down view
+        const maxPitch = Math.PI / 2 - 0.05;
+        cameraPitch = Math.max(-maxPitch, Math.min(maxPitch, cameraPitch));
+
+        const targetOffset = new THREE.Vector3(
+            Math.cos(cameraYaw) * Math.cos(cameraPitch),
+            Math.sin(cameraYaw) * Math.cos(cameraPitch),
+            Math.sin(cameraPitch)
+        );
+        
+        const targetPoint = camera.position.clone().addScaledVector(targetOffset, 20);
+        camera.lookAt(targetPoint);
+        controls.target.copy(targetPoint);
+        return;
+    }
+
     const now = performance.now();
     if (now - lastMoveTime < 30) return; // 节流控制，最多 33 FPS，防止卡顿
     lastMoveTime = now;
@@ -392,6 +519,14 @@ window.addEventListener('pointermove', (event) => {
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     
     if (event.clientX < 330) {
+        cursor.visible = false;
+        activeHit = null;
+        return;
+    }
+
+    // 性能优化点：若处于拖动视角模式或按住空格，直接跳过耗时的三维射线碰撞检测
+    const params = getBrushParams();
+    if (params.tool === 'view' || isSpacePressed) {
         cursor.visible = false;
         activeHit = null;
         return;
@@ -405,6 +540,83 @@ window.addEventListener('pointermove', (event) => {
     }
 });
 
+async function queryCellDebugInfo(x, y, z) {
+    statusEl.innerText = `正在查询网格诊断信息...`;
+    try {
+        const res = await fetch('/api/debug_cell', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ x, y, z })
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || "查询失败");
+        const data = await res.json();
+        if (data.status === 'success') {
+            statusEl.innerText = "诊断信息查询成功";
+            document.getElementById('debug-grid-coord').innerText = `[${data.grid_x}, ${data.grid_y}, ${data.grid_z}]`;
+            document.getElementById('debug-world-coord').innerText = `[${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}]`;
+            
+            // 占据状态
+            if (data.is_unknown) {
+                document.getElementById('debug-occupied').innerText = "未知 (Unknown)";
+                document.getElementById('debug-occupied').style.color = "#FF9800";
+            } else {
+                document.getElementById('debug-occupied').innerText = data.is_occupied ? "是 (Occupied)" : "否 (Free)";
+                document.getElementById('debug-occupied').style.color = data.is_occupied ? "#f44336" : "#4CAF50";
+            }
+            
+            // 地面支撑
+            document.getElementById('debug-ground-support').innerText = data.has_ground_support ? "是 (Supported)" : "否 (No Support)";
+            document.getElementById('debug-ground-support').style.color = data.has_ground_support ? "#4CAF50" : "#f44336";
+            
+            // 禁行状态与原因
+            document.getElementById('debug-preblocked').innerText = data.is_preblocked ? "是 (Preblocked)" : "否";
+            document.getElementById('debug-preblocked').style.color = data.is_preblocked ? "#f44336" : "#4CAF50";
+            
+            const reasonMap = {
+                "none": "无",
+                "manual": "手动绘制禁行",
+                "step_or_obstacle_edge": "台阶或障碍物边缘",
+                "cliff_or_suspended": "悬空或悬崖边缘"
+            };
+            document.getElementById('debug-preblocked-reason').innerText = reasonMap[data.preblocked_reason] || data.preblocked_reason;
+            
+            // 碰撞与通路阻断
+            document.getElementById('debug-horizontal-col').innerText = data.has_horizontal_collision ? "是 (Collision)" : "无";
+            document.getElementById('debug-horizontal-col').style.color = data.has_horizontal_collision ? "#f44336" : "#4CAF50";
+            
+            document.getElementById('debug-vertical-col').innerText = data.has_vertical_collision ? "是 (Collision)" : "无";
+            document.getElementById('debug-vertical-col').style.color = data.has_vertical_collision ? "#f44336" : "#4CAF50";
+            
+            document.getElementById('debug-below-preblocked').innerText = data.has_below_preblocked_failure ? "是 (Blocked Below)" : "无";
+            document.getElementById('debug-below-preblocked').style.color = data.has_below_preblocked_failure ? "#f44336" : "#4CAF50";
+            
+            // 代价
+            document.getElementById('debug-preblocked-cost').innerText = data.preblocked_cost.toFixed(3);
+            document.getElementById('debug-risk-cost').innerText = data.risk_cost.toFixed(3);
+
+            // 是否为候选点及可通行状态
+            document.getElementById('debug-candidate').innerText = data.is_candidate ? "是 (Yes)" : "否 (No)";
+            document.getElementById('debug-candidate').style.color = data.is_candidate ? "#4CAF50" : "#f44336";
+
+            document.getElementById('debug-traversable').innerText = data.is_traversable ? "是 (Yes)" : "否 (No)";
+            document.getElementById('debug-traversable').style.color = data.is_traversable ? "#4CAF50" : "#f44336";
+
+            // 缓存最新诊断数据以备复制
+            latestDebugData = {
+                world_x: x,
+                world_y: y,
+                world_z: z,
+                ...data
+            };
+        } else {
+            statusEl.innerText = `查询失败: ${data.message}`;
+            latestDebugData = null;
+        }
+    } catch (err) {
+        statusEl.innerText = `调试服务不可用: ${err.message}`;
+    }
+}
+
 window.addEventListener('pointerdown', (event) => {
     if (event.clientX < 330) return; // 避开 UI 面板
     
@@ -412,6 +624,13 @@ window.addEventListener('pointerdown', (event) => {
     console.log("【点击事件】pointerdown 触发。当前工具:", params.tool, "点击键位:", event.button, "是否按空格:", isSpacePressed);
     
     if (params.tool === 'view' || isSpacePressed || event.button !== 0) {
+        if (event.button === 2 || (event.button === 0 && (params.tool === 'view' || isSpacePressed))) {
+            syncPitchYawFromCamera();
+            isFPDragging = true;
+            prevMouseX = event.clientX;
+            prevMouseY = event.clientY;
+            controls.enabled = false;
+        }
         return;
     }
     
@@ -438,6 +657,25 @@ window.addEventListener('pointerdown', (event) => {
         return;
     }
     
+    if (params.tool === 'debug') {
+        const hitTarget = getInteractionTarget();
+        if (hitTarget) {
+            let px, py, pz;
+            if (hitTarget.type === 'voxel') {
+                // 与画笔逻辑对齐，查询表面相邻的邻近空闲网格
+                px = hitTarget.voxel.x + hitTarget.normal.x * hitTarget.scale[0];
+                py = hitTarget.voxel.y + hitTarget.normal.y * hitTarget.scale[1];
+                pz = hitTarget.voxel.z + hitTarget.normal.z * hitTarget.scale[2];
+            } else {
+                px = hitTarget.position.x;
+                py = hitTarget.position.y;
+                pz = hitTarget.position.z;
+            }
+            queryCellDebugInfo(px, py, pz);
+        }
+        return;
+    }
+    
     isPainting = true;
     controls.enabled = false; // 绘图时禁用相机旋转
     
@@ -449,11 +687,13 @@ window.addEventListener('pointerdown', (event) => {
 window.addEventListener('pointerup', () => {
     console.log("【点击事件】pointerup 释放绘图状态");
     isPainting = false;
+    if (isFPDragging) {
+        isFPDragging = false;
+    }
     controls.enabled = true;
 });
 
 // ---- 4. 网络通信 (API 调用) ----
-const statusEl = document.getElementById('status');
 
 // 初始化记录地图版本的辅助函数
 async function initMapVersions() {
@@ -505,12 +745,46 @@ async function reloadMapFromServer(silent = false) {
         const sizeRisk = data.layers.risk_cost ? data.layers.risk_cost.points.length : 0;
         console.log("【地图重载成功】数据量：占据(橙):", sizeOcc, "禁行(红):", sizePre, "可通行(绿):", sizeTrav, "通行代价(渐变):", sizeRisk);
         
+        // 自动将视角与绘制高度对齐到点云几何中心
+        if (data.layers.occupied && data.layers.occupied.points.length > 0) {
+            const pts = data.layers.occupied.points;
+            let sumX = 0, sumY = 0, sumZ = 0;
+            for (let i = 0; i < pts.length; i++) {
+                sumX += pts[i][0];
+                sumY += pts[i][1];
+                sumZ += pts[i][2];
+            }
+            const avgX = sumX / pts.length;
+            const avgY = sumY / pts.length;
+            const avgZ = sumZ / pts.length;
+
+            // 1. 将旋转中心（Orbit Target）设定为地图中心
+            controls.target.set(avgX, avgY, avgZ);
+
+            // 2. 如果是主动加载地图（非静默背景同步），将相机位置平移对齐到地图上方
+            if (!silent) {
+                camera.position.set(avgX, avgY - 25, avgZ + 25);
+                
+                // 3. 自动将初始绘图高度对齐到点云的平均高度，更新 UI 和参考平面
+                const resolutionZ = data.layers.occupied.scale[2] || 0.05;
+                zHeight = Math.round(avgZ / resolutionZ) * resolutionZ;
+                document.getElementById('edit-z').value = zHeight.toFixed(2);
+                editPlane.position.z = zHeight;
+            }
+            controls.update();
+        }
+        
         if (!silent) {
             statusEl.innerText = `加载成功! 占据: ${sizeOcc}, 禁行: ${sizePre}, 可通行: ${sizeTrav}, 代价点数: ${sizeRisk}`;
         }
         
         // 同步当前的服务器地图版本号，防止拉取完立即又检测出变化
         await initMapVersions();
+        
+        // 缓存成功的地图路径和名字
+        localStorage.setItem('map_root_path', req.root_path);
+        localStorage.setItem('map_name', req.map_name);
+        
         isDirty = false; // 重置脏标记
         isPreblockedDirty = false;
         return true;
@@ -575,35 +849,74 @@ document.getElementById('btn-sync').addEventListener('click', () => sendMapData(
 // 保存按钮
 document.getElementById('btn-save').addEventListener('click', () => sendMapData('/api/save_map'));
 
-// 视角调整功能
-function setView(viewType) {
-    controls.reset();
-    if (viewType === 'default') {
-        camera.position.set(0, -25, 25);
-        camera.up.set(0, 0, 1);
-        controls.target.set(0, 0, 0);
-    } else if (viewType === 'top') {
-        camera.position.set(0, -0.01, 35);
-        camera.up.set(0, 0, 1); // 统一保持 Z 轴向上，使用极微小的 Y 轴偏移防止万向锁
-        controls.target.set(0, 0, 0);
-    } else if (viewType === 'front') {
-        camera.position.set(0, -35, 0);
-        camera.up.set(0, 0, 1);
-        controls.target.set(0, 0, 0);
-    } else if (viewType === 'side') {
-        camera.position.set(35, 0, 0);
-        camera.up.set(0, 0, 1);
-        controls.target.set(0, 0, 0);
-    }
-    controls.update();
+// 复制诊断信息按钮
+if (btnCopyDebug) {
+    btnCopyDebug.addEventListener('click', async () => {
+        if (!latestDebugData) {
+            statusEl.innerText = "请先在地图上点击网格进行调试查询！";
+            return;
+        }
+        
+        const now = new Date();
+        const timeStr = `${now.getFullYear()}/${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+        
+        const reasonMap = {
+            "none": "无",
+            "manual": "手动绘制禁行",
+            "step_or_obstacle_edge": "台阶或障碍物边缘",
+            "cliff_or_suspended": "悬空或悬崖边缘"
+        };
+        const cnReason = reasonMap[latestDebugData.preblocked_reason] || latestDebugData.preblocked_reason;
+
+        let occupancyStr = "否 (Free)";
+        if (latestDebugData.is_unknown) {
+            occupancyStr = "未知 (Unknown)";
+        } else if (latestDebugData.is_occupied) {
+            occupancyStr = "是 (Occupied)";
+        }
+
+        const report = `### 网格调试诊断报告 ###
+- 查询时间: ${timeStr}
+- 网格坐标: [${latestDebugData.grid_x}, ${latestDebugData.grid_y}, ${latestDebugData.grid_z}]
+- 世界坐标: [${latestDebugData.world_x.toFixed(2)}, ${latestDebugData.world_y.toFixed(2)}, ${latestDebugData.world_z.toFixed(2)}]
+- 是否占据 (Occupied): ${occupancyStr}
+- 地面支撑 (Ground Support): ${latestDebugData.has_ground_support ? "是 (Supported)" : "否 (No Support)"}
+- 是否禁行 (Preblocked): ${latestDebugData.is_preblocked ? "是" : "否"} (原因: ${cnReason})
+- 水平碰撞 (Horizontal Collision): ${latestDebugData.has_horizontal_collision ? "是 (Collision)" : "无"}
+- 垂直碰撞 (Vertical Collision): ${latestDebugData.has_vertical_collision ? "是 (Collision)" : "无"}
+- 下方禁行阻断 (Below Preblocked): ${latestDebugData.has_below_preblocked_failure ? "是 (Blocked Below)" : "无"}
+- 禁行代价 (Preblocked Cost): ${latestDebugData.preblocked_cost.toFixed(3)}
+- 风险代价 (Risk Cost): ${latestDebugData.risk_cost.toFixed(3)}
+- 是否为候选点 (Is Candidate): ${latestDebugData.is_candidate ? "是" : "否"}
+- 可通行列表中 (Is Traversable): ${latestDebugData.is_traversable ? "是" : "否"}`;
+
+        try {
+            await navigator.clipboard.writeText(report);
+            const originalText = btnCopyDebug.innerText;
+            btnCopyDebug.innerText = "已复制！";
+            btnCopyDebug.style.background = "#4CAF50";
+            statusEl.innerText = "诊断报告已成功复制到剪贴板！";
+            setTimeout(() => {
+                btnCopyDebug.innerText = originalText;
+                btnCopyDebug.style.background = "#2196F3";
+            }, 1500);
+        } catch (err) {
+            statusEl.innerText = `复制失败: ${err.message}`;
+        }
+    });
 }
 
-document.getElementById('btn-view-default').addEventListener('click', () => setView('default'));
-document.getElementById('btn-view-top').addEventListener('click', () => setView('top'));
-document.getElementById('btn-view-front').addEventListener('click', () => setView('front'));
-document.getElementById('btn-view-side').addEventListener('click', () => setView('side'));
+// 阻止点击调试面板时事件向上传播，防止点击穿透到场景中
+if (debugPanelDiv) {
+    ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click'].forEach(evtName => {
+        debugPanelDiv.addEventListener(evtName, (e) => {
+            e.stopPropagation();
+        });
+    });
+}
 
-const moveSpeed = 0.2; // 键盘移动步长 (米)
+// 键盘移动步长 (米)
+const moveSpeed = 0.2;
 
 function handleKeyboardMovement() {
     if (isInputFocused()) return;

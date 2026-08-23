@@ -18,12 +18,14 @@ OctoPlannerCore::OctoPlannerCore()
   preblocked_costmap_weight_(1.5),
   lowest_traversable_only_(false),
   min_idx_{0, 0, 0},
-  max_idx_{0, 0, 0}
+  max_idx_{0, 0, 0},
+  cancel_(false)
 {
 }
 
 bool OctoPlannerCore::setOctree(const std::shared_ptr<octomap::OcTree>& octree)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   octree_ = octree;
   if (!octree_) return false;
   
@@ -37,11 +39,13 @@ bool OctoPlannerCore::setOctree(const std::shared_ptr<octomap::OcTree>& octree)
 
 void OctoPlannerCore::setExternalPreblockedCells(const std::unordered_set<GridIndex, GridIndexHash>& cells)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   external_preblocked_cells_ = cells;
 }
 
 void OctoPlannerCore::rebuildAllLayers()
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   rebuildPreblockedCells();
   rebuildDerivedLayers();
   rebuildPreblockedCostmap();
@@ -69,6 +73,7 @@ octomap::point3d OctoPlannerCore::gridToWorld(const GridIndex & idx) const
 
 bool OctoPlannerCore::isInsideMetricBounds(const GridIndex & idx) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return idx.x >= min_idx_.x && idx.x <= max_idx_.x &&
          idx.y >= min_idx_.y && idx.y <= max_idx_.y &&
          idx.z >= min_idx_.z && idx.z <= max_idx_.z;
@@ -240,6 +245,7 @@ double OctoPlannerCore::getPreblockedCost(const GridIndex & idx) const
 void OctoPlannerCore::rebuildDerivedLayers()
 {
   traversable_cells_.clear();
+  candidates_.clear();
   if (!octree_) return;
 
   double min_x, min_y, min_z, max_x, max_y, max_z;
@@ -249,27 +255,48 @@ void OctoPlannerCore::rebuildDerivedLayers()
   const GridIndex max_idx = worldToGrid(max_x, max_y, max_z);
 
   if (require_ground_support_) {
-    std::unordered_set<GridIndex, GridIndexHash> candidates;
     const int xy_r = ground_support_xy_radius_cells_;
     const int depth = ground_support_depth_cells_;
+    const double res = octree_->getResolution();
 
     for (auto it = octree_->begin_leafs(); it != octree_->end_leafs(); ++it) {
       if (!octree_->isNodeOccupied(*it)) continue;
-      const GridIndex occ = worldToGrid(it.getX(), it.getY(), it.getZ());
       
-      for (int dz = 1; dz <= std::max(1, depth); ++dz) {
-        for (int dx = -xy_r; dx <= xy_r; ++dx) {
-          for (int dy = -xy_r; dy <= xy_r; ++dy) {
-            const GridIndex candidate{occ.x + dx, occ.y + dy, occ.z + dz};
-            if (isInsideMetricBounds(candidate) && !isOccupiedCell(candidate)) {
-              candidates.insert(candidate);
+      const double x = it.getX();
+      const double y = it.getY();
+      const double z = it.getZ();
+      const double size = it.getSize();
+      
+      // Calculate how many minimal grid units this leaf spans (K)
+      const int K = static_cast<int>(std::round(size / res));
+      
+      // Locate the bottom-left grid index on the top surface of this leaf
+      const GridIndex grid_min = worldToGrid(
+        x - size / 2.0 + res / 2.0,
+        y - size / 2.0 + res / 2.0,
+        z + size / 2.0 - res / 2.0
+      );
+      
+      // Sweep the K x K grid cells on the top surface
+      for (int dx = 0; dx < K; ++dx) {
+        for (int dy = 0; dy < K; ++dy) {
+          const GridIndex top_surface_cell{grid_min.x + dx, grid_min.y + dy, grid_min.z};
+          
+          for (int dz = 1; dz <= std::max(1, depth); ++dz) {
+            for (int g_dx = -xy_r; g_dx <= xy_r; ++g_dx) {
+              for (int g_dy = -xy_r; g_dy <= xy_r; ++g_dy) {
+                const GridIndex candidate{top_surface_cell.x + g_dx, top_surface_cell.y + g_dy, top_surface_cell.z + dz};
+                if (isInsideMetricBounds(candidate) && !isOccupiedCell(candidate)) {
+                  candidates_.insert(candidate);
+                }
+              }
             }
           }
         }
       }
     }
 
-    for (const auto & idx : candidates) {
+    for (const auto & idx : candidates_) {
       if (isCellTraversable(idx, robot_radius_, require_ground_support_,
             strict_direct_ground_support_, ground_support_xy_radius_cells_,
             ground_support_depth_cells_))
@@ -297,6 +324,7 @@ void OctoPlannerCore::rebuildDerivedLayers()
 bool OctoPlannerCore::isCellTraversable(const GridIndex & idx, double robot_radius,
   bool require_ground_support, bool strict, int xy_r, int depth) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!octree_) return false;
   if (!isInsideMetricBounds(idx)) return false;
   if (require_ground_support && !hasGroundSupport(idx, strict, xy_r, depth)) return false;
@@ -337,7 +365,8 @@ bool OctoPlannerCore::isCellTraversable(const GridIndex & idx, double robot_radi
 bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
   bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const
 {
-  if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth)) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (traversable_cells_.find(seed) != traversable_cells_.end()) {
     out = seed; return true;
   }
   for (int r = 1; r <= radius_cells; ++r)
@@ -346,12 +375,12 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
         for (int dy = -r; dy <= r; ++dy) {
           if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
           GridIndex c1{seed.x + dx, seed.y + dy, seed.z + dz};
-          if (isCellTraversable(c1, robot_radius, require_ground_support, strict, xy_r, depth)) {
+          if (traversable_cells_.find(c1) != traversable_cells_.end()) {
             out = c1; return true;
           }
           if (dz > 0) {
             GridIndex c2{seed.x + dx, seed.y + dy, seed.z - dz};
-            if (isCellTraversable(c2, robot_radius, require_ground_support, strict, xy_r, depth)) {
+            if (traversable_cells_.find(c2) != traversable_cells_.end()) {
               out = c2; return true;
             }
           }
@@ -391,6 +420,7 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
                            std::vector<GridIndex>& path_cells,
                            std::string & error_msg)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   path_cells.clear();
   if (!octree_) {
     error_msg = "OctoMap is not ready/loaded.";
@@ -426,6 +456,10 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
   int iters = 0;
 
   while (!open_set.empty() && iters < max_iterations_) {
+    if (cancel_) {
+      error_msg = "Planning cancelled by a new request.";
+      return false;
+    }
     const QueueNode current = open_set.top();
     open_set.pop();
     ++iters;
@@ -440,9 +474,7 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
     for (const auto & d : directions) {
       GridIndex nbr{current.idx.x + d.x, current.idx.y + d.y, current.idx.z + d.z};
       if (closed_set.find(nbr) != closed_set.end()) continue;
-      if (!isCellTraversable(nbr, robot_radius_, require_ground_support_,
-            strict_direct_ground_support_, ground_support_xy_radius_cells_,
-            ground_support_depth_cells_))
+      if (traversable_cells_.find(nbr) == traversable_cells_.end())
         continue;
 
       double tentative_g = current.g + euclidean(current.idx, nbr);
@@ -460,6 +492,110 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
 
   error_msg = "A* planning failed or timed out (iterations limit reached).";
   return false;
+}
+
+bool OctoPlannerCore::queryCellDebugInfo(const GridIndex & idx, CellDebugDetails & details) const
+{
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!octree_) return false;
+  if (!isInsideMetricBounds(idx)) {
+    return false;
+  }
+
+  const auto p = gridToWorld(idx);
+  const octomap::OcTreeNode * node = octree_->search(p);
+  details.is_unknown = (node == nullptr);
+  details.is_occupied = (node && octree_->isNodeOccupied(node));
+  
+  if (preblocked_cells_.find(idx) != preblocked_cells_.end()) {
+    details.is_preblocked = true;
+    details.preblocked_reason = getPreblockedReason(idx);
+  } else {
+    details.is_preblocked = false;
+    details.preblocked_reason = "none";
+  }
+  
+  details.has_ground_support = hasGroundSupport(idx, strict_direct_ground_support_, 
+                                                ground_support_xy_radius_cells_, 
+                                                ground_support_depth_cells_);
+  
+  bool has_below_preblocked_failure = false;
+  double min_x, min_y, min_z, max_x, max_y, max_z;
+  octree_->getMetricMin(min_x, min_y, min_z);
+  const int min_z_idx = static_cast<int>(std::floor(min_z / octree_->getResolution()));
+
+  for (int z = idx.z - 1; z >= min_z_idx; --z) {
+    const GridIndex below_idx{idx.x, idx.y, z};
+    if (isOccupiedCell(below_idx)) break;
+    if (preblocked_cells_.find(below_idx) != preblocked_cells_.end()) {
+      has_below_preblocked_failure = true;
+      break;
+    }
+  }
+  details.has_below_preblocked_failure = has_below_preblocked_failure;
+  
+  const octomap::point3d center = gridToWorld(idx);
+  const double r = octree_->getResolution();
+  const int n = std::max(1, static_cast<int>(std::ceil(robot_radius_ / r)));
+  const double radius_sq = robot_radius_ * robot_radius_;
+
+  for (int dx = -n; dx <= n; ++dx) {
+    for (int dy = -n; dy <= n; ++dy) {
+      for (int dz = robot_clearance_height_cells_; dz <= n; ++dz) {
+        const double dist_sq =
+          (dx * r) * (dx * r) + (dy * r) * (dy * r) + (dz * r) * (dz * r);
+        if (dist_sq > radius_sq) continue;
+        const octomap::point3d p(
+          center.x() + static_cast<float>(dx * r),
+          center.y() + static_cast<float>(dy * r),
+          center.z() + static_cast<float>(dz * r));
+        const GridIndex nearby_idx = worldToGrid(p.x(), p.y(), p.z());
+        
+        if (preblocked_cells_.find(nearby_idx) != preblocked_cells_.end()) {
+          details.has_horizontal_collision = true;
+        }
+        
+        const octomap::OcTreeNode * node = octree_->search(p);
+        if (node && octree_->isNodeOccupied(node)) {
+          if (dx == 0 && dy == 0 && dz > 0) {
+            details.has_vertical_collision = true;
+          } else {
+            details.has_horizontal_collision = true;
+          }
+        }
+      }
+    }
+  }
+  
+  details.preblocked_cost = getPreblockedCost(idx);
+  details.risk_cost = details.preblocked_cost;
+  
+  details.is_candidate = (candidates_.find(idx) != candidates_.end());
+  details.is_traversable = (traversable_cells_.find(idx) != traversable_cells_.end());
+  
+  return true;
+}
+
+std::string OctoPlannerCore::getPreblockedReason(const GridIndex & idx) const
+{
+  if (external_preblocked_cells_.find(idx) != external_preblocked_cells_.end()) {
+    return "manual";
+  }
+  if (preblocked_cells_.find(idx) == preblocked_cells_.end()) {
+    return "none";
+  }
+  
+  const GridIndex below{idx.x, idx.y, idx.z - 1};
+  bool below_occ = isInsideMetricBounds(below) && isOccupiedCell(below);
+  if (below_occ && hasSameLevelNeighborWithOccupiedAbove(idx)) {
+    return "step_or_obstacle_edge";
+  }
+  
+  if (!below_occ) {
+    return "cliff_or_suspended";
+  }
+  
+  return "unknown";
 }
 
 } // namespace octo_planner

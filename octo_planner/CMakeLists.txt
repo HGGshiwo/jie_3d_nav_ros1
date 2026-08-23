@@ -57,7 +57,11 @@ target_link_libraries(octo_planner_core
 add_dependencies(octo_planner_core ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 # ---- jie_path_node ----
-add_executable(jie_path_node src/jie_path_node.cpp)
+add_executable(jie_path_node
+  src/jie_path_node.cpp
+  src/jie_path_node_callbacks.cpp
+  src/jie_path_node_services.cpp
+)
 target_link_libraries(jie_path_node
   octo_planner_core
   ${catkin_LIBRARIES}

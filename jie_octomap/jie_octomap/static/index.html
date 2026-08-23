@@ -18,6 +18,27 @@
         .btn-view:hover { background: #555; }
         hr { border-color: #444; }
         .active { border: 2px solid #fff; box-shadow: 0 0 8px #fff; }
+        #debug-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(30,30,30,0.92);
+            padding: 15px;
+            border-radius: 8px;
+            width: 330px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            border: 1px solid #444;
+            display: none;
+            z-index: 10;
+        }
+        .debug-title {
+            margin: 0 0 10px 0;
+            color: #2196F3;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+            font-size: 16px;
+            font-weight: bold;
+        }
     </style>
     <script type="importmap">
       {
@@ -46,6 +67,7 @@
             <label><input type="radio" name="tool" value="eraser"> 橡皮擦</label>
             <label><input type="radio" name="tool" value="start"> 设起点</label>
             <label><input type="radio" name="tool" value="goal"> 设终点</label>
+            <label><input type="radio" name="tool" value="debug"> 调试模式</label>
         </div>
         <div class="row">
             <span>目标图层:</span>
@@ -67,18 +89,27 @@
             <label><input type="checkbox" id="show-traversable"> 可通行(绿)</label>
             <label><input type="checkbox" id="show-risk-cost"> 通行代价(渐变)</label>
         </div>
-        <hr>
-        <h3>视角调整</h3>
-        <div class="row" style="display: flex; gap: 6px; justify-content: space-between; margin-bottom: 10px;">
-            <button id="btn-view-default" class="btn-view">默认</button>
-            <button id="btn-view-top" class="btn-view">顶视</button>
-            <button id="btn-view-front" class="btn-view">前视</button>
-            <button id="btn-view-side" class="btn-view">侧视</button>
-        </div>
-        <hr>
         <button id="btn-sync" class="btn-sync">实时同步至 ROS</button>
         <button id="btn-save" class="btn-sync" style="background:#FF9800;">永久保存地图</button>
         <div id="status" style="margin-top: 10px; font-size: 12px; color: #8bc34a;">就绪</div>
+    </div>
+    <div id="debug-panel">
+        <div class="debug-title">网格调试信息</div>
+        <div class="row"><span>网格坐标:</span> <span id="debug-grid-coord">-</span></div>
+        <div class="row"><span>世界坐标:</span> <span id="debug-world-coord">-</span></div>
+        <div class="row"><span>是否占据 (Occupied):</span> <span id="debug-occupied">-</span></div>
+        <div class="row"><span>有地面支撑 (Ground Support):</span> <span id="debug-ground-support">-</span></div>
+        <div class="row"><span>是否禁行 (Preblocked):</span> <span id="debug-preblocked">-</span></div>
+        <div class="row"><span>禁行原因:</span> <span id="debug-preblocked-reason">-</span></div>
+        <div class="row"><span>水平碰撞 (Horizontal Col):</span> <span id="debug-horizontal-col">-</span></div>
+        <div class="row"><span>垂直碰撞 (Vertical Col):</span> <span id="debug-vertical-col">-</span></div>
+        <div class="row"><span>下方禁行阻断 (Below Preblocked):</span> <span id="debug-below-preblocked">-</span></div>
+        <div class="row"><span>禁行代价 (Preblocked Cost):</span> <span id="debug-preblocked-cost">-</span></div>
+        <div class="row"><span>风险代价 (Risk Cost):</span> <span id="debug-risk-cost">-</span></div>
+        <div class="row"><span>是否为候选点 (Is Candidate):</span> <span id="debug-candidate">-</span></div>
+        <div class="row"><span>可通行列表中 (Is Traversable):</span> <span id="debug-traversable">-</span></div>
+        <hr style="border-color: #444; margin: 10px 0;">
+        <button id="btn-copy-debug" style="width: 100%; background: #2196F3; margin-top: 5px;">一键复制诊断信息</button>
     </div>
     <div id="canvas-container"></div>
     <script type="module" src="/static/app.js"></script>

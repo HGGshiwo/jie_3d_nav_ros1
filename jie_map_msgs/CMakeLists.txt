@@ -13,6 +13,7 @@ add_service_files(
   GetNavigationMapMeta.srv
   LoadNavigationMapPackage.srv
   SaveNavigationMapPackage.srv
+  QueryCellDebugInfo.srv
 )
 
 generate_messages(

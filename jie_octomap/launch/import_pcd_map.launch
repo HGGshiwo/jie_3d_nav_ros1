@@ -25,7 +25,7 @@
         <param name="map_id" value="imported_pcd_map"/>
         <param name="source_world_file" value=""/>
         <param name="robot_radius" value="0.25"/>
-        <param name="max_iterations" value="500000"/>
+        <param name="max_iterations" value="30000"/>
         <param name="snap_search_radius_cells" value="12"/>
         <param name="require_ground_support" value="true"/>
         <param name="strict_direct_ground_support" value="false"/>

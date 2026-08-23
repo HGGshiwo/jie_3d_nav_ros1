@@ -20,7 +20,7 @@ from nav_msgs.msg import Path as ROSPath
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs.point_cloud2 as pc2
 import time
-from jie_map_msgs.srv import LoadNavigationMapPackage, LoadNavigationMapPackageRequest, SaveNavigationMapPackage, SaveNavigationMapPackageRequest
+from jie_map_msgs.srv import LoadNavigationMapPackage, LoadNavigationMapPackageRequest, SaveNavigationMapPackage, SaveNavigationMapPackageRequest, QueryCellDebugInfo, QueryCellDebugInfoRequest
 
 from fastapi.middleware.gzip import GZipMiddleware
 
@@ -565,6 +565,42 @@ async def set_goal(req: PointRequest):
 @app.get("/api/get_path")
 async def get_path():
     return {"path": latest_planned_path}
+
+@app.post("/api/debug_cell")
+async def debug_cell(req: PointRequest):
+    service_name = "/jie_path_node/query_cell_debug_info"
+    try:
+        service_name = rospy.get_param("~query_cell_debug_service", service_name)
+    except Exception:
+        pass
+    try:
+        def call_service():
+            rospy.wait_for_service(service_name, timeout=1.5)
+            query_service = rospy.ServiceProxy(service_name, QueryCellDebugInfo)
+            return query_service(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z))
+        resp = await run_in_thread(call_service)
+        if not resp.success:
+            return {"status": "error", "message": resp.message}
+        return {
+            "status": "success",
+            "grid_x": resp.grid_x,
+            "grid_y": resp.grid_y,
+            "grid_z": resp.grid_z,
+            "is_occupied": resp.is_occupied,
+            "is_unknown": resp.is_unknown,
+            "has_ground_support": resp.has_ground_support,
+            "is_preblocked": resp.is_preblocked,
+            "preblocked_reason": resp.preblocked_reason,
+            "has_vertical_collision": resp.has_vertical_collision,
+            "has_horizontal_collision": resp.has_horizontal_collision,
+            "has_below_preblocked_failure": resp.has_below_preblocked_failure,
+            "preblocked_cost": resp.preblocked_cost,
+            "risk_cost": resp.risk_cost,
+            "is_candidate": resp.is_candidate,
+            "is_traversable": resp.is_traversable
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ROS 调试服务不可用: {e}")
 
 @app.get("/api/map_version")
 async def get_map_version():

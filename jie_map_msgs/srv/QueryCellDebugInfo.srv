@@ -1,0 +1,24 @@
+float64 x
+float64 y
+float64 z
+---
+bool success
+string message
+
+int32 grid_x
+int32 grid_y
+int32 grid_z
+
+bool is_occupied
+bool is_unknown
+bool has_ground_support
+bool is_preblocked
+string preblocked_reason
+bool has_vertical_collision
+bool has_horizontal_collision
+bool has_below_preblocked_failure
+
+float64 preblocked_cost
+float64 risk_cost
+bool is_candidate
+bool is_traversable
