@@ -1,0 +1,7 @@
+<library path="lib/libocto_global_planner_plugin">
+  <class name="octo_planner/OctoGlobalPlanner" type="octo_planner::OctoGlobalPlanner" base_class_type="nav_core::BaseGlobalPlanner">
+    <description>
+      A 3D path planner on OctoMap for ROS 1 move_base global_planner plugin.
+    </description>
+  </class>
+</library>

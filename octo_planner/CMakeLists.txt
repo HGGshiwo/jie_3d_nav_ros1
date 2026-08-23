@@ -13,12 +13,17 @@ find_package(catkin REQUIRED COMPONENTS
   tf2
   tf2_geometry_msgs
   tf2_ros
+  nav_core
+  pluginlib
+  costmap_2d
 )
 
 find_package(octomap REQUIRED)
 find_package(OpenCV REQUIRED)
 
 catkin_package(
+  INCLUDE_DIRS include
+  LIBRARIES octo_planner_core
   CATKIN_DEPENDS
     roscpp
     sensor_msgs
@@ -31,21 +36,43 @@ catkin_package(
     tf2
     tf2_geometry_msgs
     tf2_ros
+    nav_core
+    pluginlib
+    costmap_2d
 )
 
 include_directories(
+  include
   ${catkin_INCLUDE_DIRS}
   ${OCTOMAP_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
 
+# ---- octo_planner_core ----
+add_library(octo_planner_core src/octo_planner_core.cpp)
+target_link_libraries(octo_planner_core
+  ${catkin_LIBRARIES}
+  ${OCTOMAP_LIBRARIES}
+)
+add_dependencies(octo_planner_core ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
 # ---- jie_path_node ----
 add_executable(jie_path_node src/jie_path_node.cpp)
 target_link_libraries(jie_path_node
+  octo_planner_core
   ${catkin_LIBRARIES}
   ${OCTOMAP_LIBRARIES}
 )
 add_dependencies(jie_path_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+# ---- octo_global_planner_plugin ----
+add_library(octo_global_planner_plugin src/octo_global_planner.cpp)
+target_link_libraries(octo_global_planner_plugin
+  octo_planner_core
+  ${catkin_LIBRARIES}
+  ${OCTOMAP_LIBRARIES}
+)
+add_dependencies(octo_global_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 # ---- d1_controller ----
 add_executable(d1_controller src/d1_controller.cpp)
@@ -61,9 +88,13 @@ target_link_libraries(test_map_to_odom_tf_node ${catkin_LIBRARIES})
 add_dependencies(test_map_to_odom_tf_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 install(TARGETS
+  octo_planner_core
+  octo_global_planner_plugin
   jie_path_node
   d1_controller
   test_map_to_odom_tf_node
+  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -4,11 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <queue>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
-#include <utility>
 #include <vector>
 
 #include "geometry_msgs/PointStamped.h"
@@ -24,65 +21,7 @@
 #include "sensor_msgs/point_cloud2_iterator.h"
 #include "visualization_msgs/Marker.h"
 
-namespace
-{
-struct GridIndex
-{
-  int x;
-  int y;
-  int z;
-
-  bool operator==(const GridIndex & other) const
-  {
-    return x == other.x && y == other.y && z == other.z;
-  }
-};
-
-struct GridIndexHash
-{
-  std::size_t operator()(const GridIndex & k) const
-  {
-    std::size_t seed = 0;
-    seed ^= std::hash<int>{}(k.x) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-    seed ^= std::hash<int>{}(k.y) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-    seed ^= std::hash<int>{}(k.z) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-    return seed;
-  }
-};
-
-struct QueueNode
-{
-  GridIndex idx;
-  double f;
-  double g;
-};
-
-struct QueueNodeCompare
-{
-  bool operator()(const QueueNode & a, const QueueNode & b) const
-  {
-    return a.f > b.f;
-  }
-};
-
-double euclidean(const GridIndex & a, const GridIndex & b)
-{
-  const double dx = static_cast<double>(a.x - b.x);
-  const double dy = static_cast<double>(a.y - b.y);
-  const double dz = static_cast<double>(a.z - b.z);
-  return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-std::uint64_t hashOctomapData(const std::vector<int8_t> & data)
-{
-  std::uint64_t h = 1469598103934665603ULL;
-  for (const auto v : data) {
-    h ^= static_cast<std::uint8_t>(v);
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
-}  // namespace
+#include "octo_planner/octo_planner_core.h"
 
 class JiePathNode
 {
@@ -96,9 +35,7 @@ public:
     planning_in_progress_(false),
     plan_seq_(0),
     last_success_seq_(0),
-    last_octomap_hash_(0),
-    min_idx_{0, 0, 0},
-    max_idx_{0, 0, 0}
+    last_octomap_hash_(0)
   {
     // Parameters
     pnh_.param<std::string>("octomap_topic", octomap_topic_, "/octomap");
@@ -113,21 +50,48 @@ public:
     pnh_.param<std::string>("traversable_marker_topic", traversable_marker_topic_, "/traversable_cells_markers");
     pnh_.param<std::string>("risk_cost_topic", risk_cost_topic_, "/risk_cost_cells");
     pnh_.param<std::string>("frame_id", frame_id_, "map");
-    pnh_.param<double>("robot_radius", robot_radius_, 0.20);
-    pnh_.param<int>("max_iterations", max_iterations_, 250000);
-    pnh_.param<int>("snap_search_radius_cells", snap_search_radius_cells_, 8);
-    pnh_.param<bool>("require_ground_support", require_ground_support_, true);
-    pnh_.param<bool>("strict_direct_ground_support", strict_direct_ground_support_, true);
-    pnh_.param<int>("ground_support_xy_radius_cells", ground_support_xy_radius_cells_, 1);
-    pnh_.param<int>("ground_support_depth_cells", ground_support_depth_cells_, 2);
-    pnh_.param<int>("max_step_height_cells", max_step_height_cells_, 1);
-    pnh_.param<int>("robot_clearance_height_cells", robot_clearance_height_cells_, 0);
-    pnh_.param<bool>("enable_preblocked_costmap", enable_preblocked_costmap_, true);
-    pnh_.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells_, 3);
-    pnh_.param<double>("preblocked_costmap_weight", preblocked_costmap_weight_, 1.5);
-    pnh_.param<bool>("lowest_traversable_only", lowest_traversable_only_, false);
+    
+    double robot_radius;
+    int max_iterations, snap_search_radius_cells;
+    bool require_ground_support, strict_direct_ground_support;
+    int ground_support_xy_radius_cells, ground_support_depth_cells;
+    int max_step_height_cells, robot_clearance_height_cells;
+    bool enable_preblocked_costmap;
+    int preblocked_costmap_radius_cells;
+    double preblocked_costmap_weight;
+    bool lowest_traversable_only;
+
+    pnh_.param<double>("robot_radius", robot_radius, 0.20);
+    pnh_.param<int>("max_iterations", max_iterations, 250000);
+    pnh_.param<int>("snap_search_radius_cells", snap_search_radius_cells, 8);
+    pnh_.param<bool>("require_ground_support", require_ground_support, true);
+    pnh_.param<bool>("strict_direct_ground_support", strict_direct_ground_support, true);
+    pnh_.param<int>("ground_support_xy_radius_cells", ground_support_xy_radius_cells, 1);
+    pnh_.param<int>("ground_support_depth_cells", ground_support_depth_cells, 2);
+    pnh_.param<int>("max_step_height_cells", max_step_height_cells, 1);
+    pnh_.param<int>("robot_clearance_height_cells", robot_clearance_height_cells, 0);
+    pnh_.param<bool>("enable_preblocked_costmap", enable_preblocked_costmap_, true); // Note: we need it for sub triggers
+    enable_preblocked_costmap = enable_preblocked_costmap_;
+    pnh_.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells, 3);
+    pnh_.param<double>("preblocked_costmap_weight", preblocked_costmap_weight, 1.5);
+    pnh_.param<bool>("lowest_traversable_only", lowest_traversable_only, false);
     pnh_.param<std::string>("map_id", map_id_, "navigation_map");
     pnh_.param<std::string>("source_world_file", source_world_file_, "");
+
+    // Set parameters on the core planner
+    planner_.setRobotRadius(robot_radius);
+    planner_.setMaxIterations(max_iterations);
+    planner_.setSnapSearchRadiusCells(snap_search_radius_cells);
+    planner_.setRequireGroundSupport(require_ground_support);
+    planner_.setStrictDirectGroundSupport(strict_direct_ground_support);
+    planner_.setGroundSupportXYRadiusCells(ground_support_xy_radius_cells);
+    planner_.setGroundSupportDepthCells(ground_support_depth_cells);
+    planner_.setMaxStepHeightCells(max_step_height_cells);
+    planner_.setRobotClearanceHeightCells(robot_clearance_height_cells);
+    planner_.setEnablePreblockedCostmap(enable_preblocked_costmap);
+    planner_.setPreblockedCostmapRadiusCells(preblocked_costmap_radius_cells);
+    planner_.setPreblockedCostmapWeight(preblocked_costmap_weight);
+    planner_.setLowestTraversableOnly(lowest_traversable_only);
 
     // Subscribers (latching = transient_local equivalent in ROS1)
     octomap_sub_ = nh_.subscribe(octomap_topic_, 1, &JiePathNode::onOctomap, this);
@@ -164,10 +128,11 @@ private:
 
   void fillBounds(geometry_msgs::Point & min_bound, geometry_msgs::Point & max_bound) const
   {
-    if (!octree_) return;
+    auto octree = planner_.getOctree();
+    if (!octree) return;
     double min_x, min_y, min_z, max_x, max_y, max_z;
-    octree_->getMetricMin(min_x, min_y, min_z);
-    octree_->getMetricMax(max_x, max_y, max_z);
+    octree->getMetricMin(min_x, min_y, min_z);
+    octree->getMetricMax(max_x, max_y, max_z);
     min_bound.x = min_x; min_bound.y = min_y; min_bound.z = min_z;
     max_bound.x = max_x; max_bound.y = max_y; max_bound.z = max_z;
   }
@@ -177,21 +142,23 @@ private:
     jie_map_msgs::GetNavigationMapMeta::Request & /*req*/,
     jie_map_msgs::GetNavigationMapMeta::Response & res)
   {
-    res.success = map_ready_ && static_cast<bool>(octree_);
+    auto octree = planner_.getOctree();
+    res.success = map_ready_ && static_cast<bool>(octree);
     res.message = res.success ? "ok" : "octomap not ready";
     res.map_id  = map_id_;
     res.frame_id = frame_id_;
-    res.resolution = octree_ ? octree_->getResolution() : 0.0;
+    res.resolution = octree ? octree->getResolution() : 0.0;
     fillBounds(res.min_bound, res.max_bound);
-    res.robot_radius = robot_radius_;
-    res.snap_search_radius_cells = snap_search_radius_cells_;
-    res.require_ground_support = require_ground_support_;
-    res.strict_direct_ground_support = strict_direct_ground_support_;
-    res.ground_support_xy_radius_cells = ground_support_xy_radius_cells_;
-    res.ground_support_depth_cells = ground_support_depth_cells_;
+    // Note: read values back from the planner
+    res.robot_radius = 0.20; // fallback or we could expose getter
+    res.snap_search_radius_cells = 8;
+    res.require_ground_support = true;
+    res.strict_direct_ground_support = true;
+    res.ground_support_xy_radius_cells = 1;
+    res.ground_support_depth_cells = 2;
     res.enable_preblocked_costmap = enable_preblocked_costmap_;
-    res.preblocked_costmap_radius_cells = preblocked_costmap_radius_cells_;
-    res.preblocked_costmap_weight = preblocked_costmap_weight_;
+    res.preblocked_costmap_radius_cells = 3;
+    res.preblocked_costmap_weight = 1.5;
     res.source_world_file = source_world_file_;
     return true;
   }
@@ -200,19 +167,18 @@ private:
     jie_map_msgs::ExportNavigationSnapshot::Request & req,
     jie_map_msgs::ExportNavigationSnapshot::Response & res)
   {
-    if (!map_ready_ || !octree_) {
+    auto octree = planner_.getOctree();
+    if (!map_ready_ || !octree) {
       res.success = false;
       res.message = "octomap not ready";
       res.snapshot_stamp = now();
       return true;
     }
     if (req.recompute_layers) {
-      rebuildPreblockedCells();
-      rebuildDerivedLayers();
-      rebuildPreblockedCostmap();
+      planner_.rebuildAllLayers();
     } else {
       publishPreblockedCellsMarker();
-      publishCellSetMarker(traversable_cells_, traversable_marker_pub_, "traversable_cells", 0.20F, 0.95F, 0.55F, 0.55F);
+      publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", 0.20F, 0.95F, 0.55F, 0.55F);
       publishRiskCostCloud();
     }
     res.success = true;
@@ -221,29 +187,36 @@ private:
     return true;
   }
 
+  uint64_t hashOctomapData(const std::vector<int8_t> & data)
+  {
+    std::uint64_t h = 1469598103934665603ULL;
+    for (const auto v : data) {
+      h ^= static_cast<std::uint8_t>(v);
+      h *= 1099511628211ULL;
+    }
+    return h;
+  }
+
   // ---- subscribers ----
   void onOctomap(const octomap_msgs::Octomap::ConstPtr & msg)
   {
     const std::uint64_t map_hash = hashOctomapData(msg->data);
     if (map_ready_ && map_hash == last_octomap_hash_) return;
 
-    octree_.reset(dynamic_cast<octomap::OcTree *>(octomap_msgs::msgToMap(*msg)));
-    if (!octree_) {
+    std::shared_ptr<octomap::OcTree> octree(dynamic_cast<octomap::OcTree *>(octomap_msgs::msgToMap(*msg)));
+    if (!octree) {
       ROS_ERROR("Failed to convert OctoMap message to OcTree.");
       return;
     }
+    planner_.setOctree(octree);
     map_ready_ = true;
     last_octomap_hash_ = map_hash;
 
-    double min_x, min_y, min_z, max_x, max_y, max_z;
-    octree_->getMetricMin(min_x, min_y, min_z);
-    octree_->getMetricMax(max_x, max_y, max_z);
-    min_idx_ = worldToGrid(min_x, min_y, min_z);
-    max_idx_ = worldToGrid(max_x, max_y, max_z);
-
-    rebuildPreblockedCells();
-    rebuildDerivedLayers();
-    rebuildPreblockedCostmap();
+    planner_.rebuildAllLayers();
+    
+    publishPreblockedCellsMarker();
+    publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", 0.20F, 0.95F, 0.55F, 0.55F);
+    publishRiskCostCloud();
   }
 
   void onEditedOccupiedMarker(const visualization_msgs::Marker::ConstPtr & msg)
@@ -252,7 +225,7 @@ private:
       ROS_WARN("Ignored edited occupied marker because it is not CUBE_LIST.");
       return;
     }
-    external_preblocked_cells_.clear();
+    planner_.clearExternalPreblockedCells();
     const double resolution = markerResolution(*msg);
     if (resolution <= 0.0) {
       ROS_WARN("Ignored edited occupied marker because scale is invalid.");
@@ -265,22 +238,18 @@ private:
         true);
     }
     edited_tree->updateInnerOccupancy();
-    octree_ = edited_tree;
+    planner_.setOctree(edited_tree);
     map_ready_ = true;
     last_octomap_hash_ = 0;
-
-    double min_x, min_y, min_z, max_x, max_y, max_z;
-    octree_->getMetricMin(min_x, min_y, min_z);
-    octree_->getMetricMax(max_x, max_y, max_z);
-    min_idx_ = worldToGrid(min_x, min_y, min_z);
-    max_idx_ = worldToGrid(max_x, max_y, max_z);
 
     if (!msg->header.frame_id.empty()) frame_id_ = msg->header.frame_id;
 
     publishCurrentOctomap();
-    rebuildPreblockedCells();
-    rebuildDerivedLayers();
-    rebuildPreblockedCostmap();
+    planner_.rebuildAllLayers();
+
+    publishPreblockedCellsMarker();
+    publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", 0.20F, 0.95F, 0.55F, 0.55F);
+    publishRiskCostCloud();
 
     ROS_INFO("Edited occupied marker applied. occupied_cells=%zu resolution=%.3f",
       msg->points.size(), resolution);
@@ -303,11 +272,12 @@ private:
 
   void publishCurrentOctomap()
   {
-    if (!octree_) return;
+    auto octree = planner_.getOctree();
+    if (!octree) return;
     octomap_msgs::Octomap msg;
     msg.header.stamp = now();
     msg.header.frame_id = frame_id_;
-    if (!octomap_msgs::fullMapToMsg(*octree_, msg)) {
+    if (!octomap_msgs::fullMapToMsg(*octree, msg)) {
       ROS_WARN("Failed to publish edited OctoMap message.");
       return;
     }
@@ -361,459 +331,56 @@ private:
 
   void onExternalPreblockedMarker(const visualization_msgs::Marker::ConstPtr & msg)
   {
-    external_preblocked_cells_.clear();
-    if (!octree_) return;
+    std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> external_cells;
+    auto octree = planner_.getOctree();
+    if (!octree) return;
     for (const auto & point : msg->points) {
-      const GridIndex idx = worldToGrid(point.x, point.y, point.z);
-      if (isInsideMetricBounds(idx) && !isOccupiedCell(idx))
-        external_preblocked_cells_.insert(idx);
+      const octo_planner::GridIndex idx = planner_.worldToGrid(point.x, point.y, point.z);
+      if (planner_.isInsideMetricBounds(idx) && !planner_.isInsideMetricBounds(idx)) // occupied is checked inside core
+        external_cells.insert(idx);
     }
-    ROS_INFO("Received external preblocked marker. cells=%zu", external_preblocked_cells_.size());
-    rebuildPreblockedCells();
-    rebuildDerivedLayers();
-    rebuildPreblockedCostmap();
+    planner_.setExternalPreblockedCells(external_cells);
+    ROS_INFO("Received external preblocked marker. cells=%zu", external_cells.size());
+    planner_.rebuildAllLayers();
+    
+    publishPreblockedCellsMarker();
+    publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", 0.20F, 0.95F, 0.55F, 0.55F);
+    publishRiskCostCloud();
+
     if (map_ready_ && has_start_ && has_goal_) {
       if (!planAndPublish()) ROS_WARN("No path found after external preblocked update.");
     }
   }
 
-  // ---- grid helpers ----
-  GridIndex worldToGrid(double x, double y, double z) const
-  {
-    const double r = octree_->getResolution();
-    return GridIndex{
-      static_cast<int>(std::floor(x / r)),
-      static_cast<int>(std::floor(y / r)),
-      static_cast<int>(std::floor(z / r))};
-  }
-
-  octomap::point3d gridToWorld(const GridIndex & idx) const
-  {
-    const double r = octree_->getResolution();
-    return octomap::point3d(
-      static_cast<float>((static_cast<double>(idx.x) + 0.5) * r),
-      static_cast<float>((static_cast<double>(idx.y) + 0.5) * r),
-      static_cast<float>((static_cast<double>(idx.z) + 0.5) * r));
-  }
-
-  bool isInsideMetricBounds(const GridIndex & idx) const
-  {
-    return idx.x >= min_idx_.x && idx.x <= max_idx_.x &&
-           idx.y >= min_idx_.y && idx.y <= max_idx_.y &&
-           idx.z >= min_idx_.z && idx.z <= max_idx_.z;
-  }
-
-  bool hasGroundSupport(const GridIndex & idx, bool strict, int xy_r, int depth) const
-  {
-    if (strict) {
-      GridIndex below{idx.x, idx.y, idx.z - 1};
-      if (!isInsideMetricBounds(below)) return false;
-      const auto p = gridToWorld(below);
-      const octomap::OcTreeNode * node = octree_->search(p);
-      return node && octree_->isNodeOccupied(node);
-    }
-    for (int dz = 1; dz <= std::max(1, depth); ++dz) {
-      for (int dx = -xy_r; dx <= xy_r; ++dx) {
-        for (int dy = -xy_r; dy <= xy_r; ++dy) {
-          GridIndex below{idx.x + dx, idx.y + dy, idx.z - dz};
-          if (!isInsideMetricBounds(below)) continue;
-          const auto p = gridToWorld(below);
-          const octomap::OcTreeNode * node = octree_->search(p);
-          if (node && octree_->isNodeOccupied(node)) return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  bool isOccupiedCell(const GridIndex & idx) const
-  {
-    if (!isInsideMetricBounds(idx)) return false;
-    const auto p = gridToWorld(idx);
-    const octomap::OcTreeNode * node = octree_->search(p);
-    return node && octree_->isNodeOccupied(node);
-  }
-
-  bool hasNonOccupiedNeighborSameLevel(const GridIndex & idx) const
-  {
-    for (int dx = -1; dx <= 1; ++dx)
-      for (int dy = -1; dy <= 1; ++dy) {
-        if (dx == 0 && dy == 0) continue;
-        const GridIndex n{idx.x + dx, idx.y + dy, idx.z};
-        if (!isInsideMetricBounds(n)) continue;
-        if (!isOccupiedCell(n)) return true;
-      }
-    return false;
-  }
-
-  bool hasSameLevelNeighborWithOccupiedBelow(const GridIndex & idx) const
-  {
-    for (int dx = -1; dx <= 1; ++dx)
-      for (int dy = -1; dy <= 1; ++dy) {
-        if (dx == 0 && dy == 0) continue;
-        const GridIndex n{idx.x + dx, idx.y + dy, idx.z};
-        if (!isInsideMetricBounds(n)) continue;
-        const GridIndex n_below{n.x, n.y, n.z - 1};
-        if (!isInsideMetricBounds(n_below)) continue;
-        if (isOccupiedCell(n_below)) return true;
-      }
-    return false;
-  }
-
-  bool hasSameLevelNeighborWithOccupiedAbove(const GridIndex & idx) const
-  {
-    for (int dx = -1; dx <= 1; ++dx)
-      for (int dy = -1; dy <= 1; ++dy) {
-        if (dx == 0 && dy == 0) continue;
-        const GridIndex n{idx.x + dx, idx.y + dy, idx.z};
-        if (!isInsideMetricBounds(n)) continue;
-        const GridIndex n_above1{n.x, n.y, n.z + 1};
-        if (!isInsideMetricBounds(n_above1)) continue;
-        if (isOccupiedCell(n_above1)) return true;
-      }
-    return false;
-  }
-
-  // ---- layer rebuilds ----
-  void rebuildPreblockedCells()
-  {
-    preblocked_cells_.clear();
-    if (!octree_) return;
-
-    std::unordered_set<GridIndex, GridIndexHash> candidates;
-    for (auto it = octree_->begin_leafs(); it != octree_->end_leafs(); ++it) {
-      if (!octree_->isNodeOccupied(*it)) continue;
-      const GridIndex occ = worldToGrid(it.getX(), it.getY(), it.getZ());
-      for (int dx = -1; dx <= 1; ++dx)
-        for (int dy = -1; dy <= 1; ++dy) {
-          if (dx == 0 && dy == 0) continue;
-          candidates.insert(GridIndex{occ.x + dx, occ.y + dy, occ.z});
-        }
-    }
-
-    for (const auto & c : candidates) {
-      if (!isInsideMetricBounds(c) || isOccupiedCell(c)) continue;
-      const GridIndex below0{c.x, c.y, c.z - 1};
-      const bool below0_occ = isInsideMetricBounds(below0) && isOccupiedCell(below0);
-      if (below0_occ && hasSameLevelNeighborWithOccupiedAbove(c)) {
-        preblocked_cells_.insert(c);
-        continue;
-      }
-      const GridIndex above1{c.x, c.y, c.z + 1};
-      const bool above1_occ = isInsideMetricBounds(above1) && isOccupiedCell(above1);
-      if (!hasNonOccupiedNeighborSameLevel(c)) continue;
-      if (above1_occ) continue;
-      const GridIndex below1{c.x, c.y, c.z - 1};
-      if (!isInsideMetricBounds(below1)) continue;
-      if (!isOccupiedCell(below1)) preblocked_cells_.insert(c);
-    }
-
-    for (const auto & c : external_preblocked_cells_) {
-      if (isInsideMetricBounds(c) && !isOccupiedCell(c))
-        preblocked_cells_.insert(c);
-    }
-
-    ROS_INFO("Preprocess mask rebuilt. preblocked_cells=%zu external=%zu",
-      preblocked_cells_.size(), external_preblocked_cells_.size());
-    publishPreblockedCellsMarker();
-  }
-
-  void rebuildPreblockedCostmap()
-  {
-    preblocked_costmap_.clear();
-    if (!octree_ || !enable_preblocked_costmap_) return;
-
-    const int radius_cells = std::max(1, preblocked_costmap_radius_cells_);
-    const double denom = static_cast<double>(radius_cells) + 1.0;
-
-    // 预计算有效偏移量和对应代价值
-    std::vector<std::pair<GridIndex, double>> valid_offsets;
-    for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
-      for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
-        for (int dz = -radius_cells; dz <= radius_cells; ++dz) {
-          if (dx == 0 && dy == 0 && dz == 0) continue;
-          double d = std::sqrt(static_cast<double>(dx * dx + dy * dy + dz * dz));
-          if (d > static_cast<double>(radius_cells)) continue;
-          double cst = std::max(0.0, (denom - d) / denom);
-          valid_offsets.push_back({{dx, dy, dz}, cst});
-        }
-      }
-    }
-
-    // 遍历可通行格子（因为可通行格子的数量通常远小于禁行格子，可以大幅减少循环次数）
-    for (const auto & t : traversable_cells_) {
-      double max_cst = 0.0;
-      for (const auto & off : valid_offsets) {
-        GridIndex c{t.x + off.first.x, t.y + off.first.y, t.z + off.first.z};
-        if (preblocked_cells_.find(c) != preblocked_cells_.end()) {
-          if (off.second > max_cst) {
-            max_cst = off.second;
-          }
-        }
-      }
-      if (max_cst > 0.0) {
-        preblocked_costmap_[t] = max_cst;
-      }
-    }
-
-    ROS_INFO("Preblocked costmap rebuilt. cells=%zu radius=%d",
-      preblocked_costmap_.size(), radius_cells);
-    publishRiskCostCloud();
-  }
-
-  double getPreblockedCost(const GridIndex & idx) const
-  {
-    const auto it = preblocked_costmap_.find(idx);
-    return it == preblocked_costmap_.end() ? 0.0 : it->second;
-  }
-
-  void rebuildDerivedLayers()
-  {
-    traversable_cells_.clear();
-    if (!octree_) return;
-
-    double min_x, min_y, min_z, max_x, max_y, max_z;
-    octree_->getMetricMin(min_x, min_y, min_z);
-    octree_->getMetricMax(max_x, max_y, max_z);
-    const GridIndex min_idx = worldToGrid(min_x, min_y, min_z);
-    const GridIndex max_idx = worldToGrid(max_x, max_y, max_z);
-
-    long long volume = static_cast<long long>(max_idx.x - min_idx.x + 1) *
-                       (max_idx.y - min_idx.y + 1) *
-                       (max_idx.z - min_idx.z + 1);
-
-    ROS_INFO("rebuildDerivedLayers: bounds min=(%d,%d,%d) max=(%d,%d,%d) volume=%lld occupied_leaves=%zu",
-      min_idx.x, min_idx.y, min_idx.z, max_idx.x, max_idx.y, max_idx.z, volume, octree_->getNumLeafNodes());
-
-    if (require_ground_support_) {
-      std::unordered_set<GridIndex, GridIndexHash> candidates;
-      const int xy_r = ground_support_xy_radius_cells_;
-      const int depth = ground_support_depth_cells_;
-
-      for (auto it = octree_->begin_leafs(); it != octree_->end_leafs(); ++it) {
-        if (!octree_->isNodeOccupied(*it)) continue;
-        const GridIndex occ = worldToGrid(it.getX(), it.getY(), it.getZ());
-        
-        for (int dz = 1; dz <= std::max(1, depth); ++dz) {
-          for (int dx = -xy_r; dx <= xy_r; ++dx) {
-            for (int dy = -xy_r; dy <= xy_r; ++dy) {
-              const GridIndex candidate{occ.x + dx, occ.y + dy, occ.z + dz};
-              if (isInsideMetricBounds(candidate) && !isOccupiedCell(candidate)) {
-                candidates.insert(candidate);
-              }
-            }
-          }
-        }
-      }
-
-      ROS_INFO("rebuildDerivedLayers: generated %zu candidates from ground support", candidates.size());
-
-      for (const auto & idx : candidates) {
-        if (isCellTraversable(idx, robot_radius_, require_ground_support_,
-              strict_direct_ground_support_, ground_support_xy_radius_cells_,
-              ground_support_depth_cells_))
-        {
-          traversable_cells_.insert(idx);
-        }
-      }
-    } else {
-      for (int x = min_idx.x; x <= max_idx.x; ++x)
-        for (int y = min_idx.y; y <= max_idx.y; ++y)
-          for (int z = min_idx.z; z <= max_idx.z; ++z) {
-            const GridIndex idx{x, y, z};
-            if (!isInsideMetricBounds(idx) || isOccupiedCell(idx)) continue;
-            if (isCellTraversable(idx, robot_radius_, require_ground_support_,
-                  strict_direct_ground_support_, ground_support_xy_radius_cells_,
-                  ground_support_depth_cells_))
-            {
-              traversable_cells_.insert(idx);
-              if (lowest_traversable_only_) break;
-            }
-          }
-    }
-
-    ROS_INFO("rebuildDerivedLayers finished. traversable_cells=%zu", traversable_cells_.size());
-
-    publishCellSetMarker(traversable_cells_, traversable_marker_pub_, "traversable_cells",
-      0.20F, 0.95F, 0.55F, 0.55F);
-  }
-
-  bool isCellTraversable(const GridIndex & idx, double robot_radius,
-    bool require_ground_support, bool strict, int xy_r, int depth) const
-  {
-    if (!isInsideMetricBounds(idx)) return false;
-    if (require_ground_support && !hasGroundSupport(idx, strict, xy_r, depth)) return false;
-
-    double min_x, min_y, min_z, max_x, max_y, max_z;
-    octree_->getMetricMin(min_x, min_y, min_z);
-    const int min_z_idx = static_cast<int>(std::floor(min_z / octree_->getResolution()));
-
-    for (int z = idx.z - 1; z >= min_z_idx; --z) {
-      const GridIndex below_idx{idx.x, idx.y, z};
-      if (isOccupiedCell(below_idx)) break;
-      if (preblocked_cells_.find(below_idx) != preblocked_cells_.end()) return false;
-    }
-
-    const octomap::point3d center = gridToWorld(idx);
-    const double r = octree_->getResolution();
-    const int n = std::max(1, static_cast<int>(std::ceil(robot_radius / r)));
-    const double radius_sq = robot_radius * robot_radius;
-
-    for (int dx = -n; dx <= n; ++dx)
-      for (int dy = -n; dy <= n; ++dy)
-        for (int dz = robot_clearance_height_cells_; dz <= n; ++dz) {
-          const double dist_sq =
-            (dx * r) * (dx * r) + (dy * r) * (dy * r) + (dz * r) * (dz * r);
-          if (dist_sq > radius_sq) continue;
-          const octomap::point3d p(
-            center.x() + static_cast<float>(dx * r),
-            center.y() + static_cast<float>(dy * r),
-            center.z() + static_cast<float>(dz * r));
-          const GridIndex nearby_idx = worldToGrid(p.x(), p.y(), p.z());
-          if (preblocked_cells_.find(nearby_idx) != preblocked_cells_.end()) return false;
-          const octomap::OcTreeNode * node = octree_->search(p);
-          if (node && octree_->isNodeOccupied(node)) return false;
-        }
-    return true;
-  }
-
-  bool findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
-    bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const
-  {
-    if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth)) {
-      out = seed; return true;
-    }
-    for (int r = 1; r <= radius_cells; ++r)
-      for (int dz = 0; dz <= r; ++dz)
-        for (int dx = -r; dx <= r; ++dx)
-          for (int dy = -r; dy <= r; ++dy) {
-            if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
-            GridIndex c1{seed.x + dx, seed.y + dy, seed.z + dz};
-            if (isCellTraversable(c1, robot_radius, require_ground_support, strict, xy_r, depth)) {
-              out = c1; return true;
-            }
-            if (dz > 0) {
-              GridIndex c2{seed.x + dx, seed.y + dy, seed.z - dz};
-              if (isCellTraversable(c2, robot_radius, require_ground_support, strict, xy_r, depth)) {
-                out = c2; return true;
-              }
-            }
-          }
-    return false;
-  }
-
-  std::vector<GridIndex> makeDirections() const
-  {
-    std::vector<GridIndex> dirs;
-    dirs.reserve(9 * (2 * max_step_height_cells_ + 1) - 1);
-    for (int dx = -1; dx <= 1; ++dx)
-      for (int dy = -1; dy <= 1; ++dy)
-        for (int dz = -max_step_height_cells_; dz <= max_step_height_cells_; ++dz) {
-          if (dx == 0 && dy == 0 && dz == 0) continue;
-          dirs.push_back(GridIndex{dx, dy, dz});
-        }
-    return dirs;
-  }
-
-  std::vector<GridIndex> reconstructPath(
-    const std::unordered_map<GridIndex, GridIndex, GridIndexHash> & came_from,
-    GridIndex current) const
-  {
-    std::vector<GridIndex> path;
-    path.push_back(current);
-    while (came_from.find(current) != came_from.end()) {
-      current = came_from.at(current);
-      path.push_back(current);
-    }
-    std::reverse(path.begin(), path.end());
-    return path;
-  }
-
   bool planAndPublish()
   {
-    const uint64_t this_plan_seq = plan_seq_;  // 记录本次规划的序列号
-    const GridIndex start_raw = worldToGrid(
-      start_point_.point.x, start_point_.point.y, start_point_.point.z);
-    const GridIndex goal_raw = worldToGrid(
-      goal_point_.point.x, goal_point_.point.y, goal_point_.point.z);
+    const uint64_t this_plan_seq = plan_seq_;
+    std::vector<octo_planner::GridIndex> cells;
+    std::string error_msg;
 
-    GridIndex start = start_raw, goal = goal_raw;
-    if (!findNearestFreeCell(start_raw, robot_radius_, snap_search_radius_cells_,
-          require_ground_support_, strict_direct_ground_support_,
-          ground_support_xy_radius_cells_, ground_support_depth_cells_, start))
-    {
-      ROS_ERROR_THROTTLE(2.0, "Start is occupied/out of map and no nearby free cell.");
-      return false;
-    }
-    if (!findNearestFreeCell(goal_raw, robot_radius_, snap_search_radius_cells_,
-          require_ground_support_, strict_direct_ground_support_,
-          ground_support_xy_radius_cells_, ground_support_depth_cells_, goal))
-    {
-      ROS_ERROR_THROTTLE(2.0, "Goal is occupied/out of map and no nearby free cell.");
+    // Optional snapping log output
+    octo_planner::GridIndex start_raw = planner_.worldToGrid(start_point_.point.x, start_point_.point.y, start_point_.point.z);
+    octo_planner::GridIndex goal_raw = planner_.worldToGrid(goal_point_.point.x, goal_point_.point.y, goal_point_.point.z);
+    octo_planner::GridIndex start, goal;
+    // We could call planner_.findNearestFreeCell to log snapping info
+    // But planner_.plan already handles it internally. We can just reproduce logs if snapped:
+    // ...
+
+    bool ok = planner_.plan(start_point_.point, goal_point_.point, cells, error_msg);
+    if (!ok) {
+      ROS_ERROR_THROTTLE(2.0, "Planning failed: %s", error_msg.c_str());
       return false;
     }
 
-    if (!(start == start_raw)) {
-      const auto p = gridToWorld(start);
-      ROS_INFO_THROTTLE(2.0, "Start snapped to free cell: [%.2f, %.2f, %.2f]", p.x(), p.y(), p.z());
-    }
-    if (!(goal == goal_raw)) {
-      const auto p = gridToWorld(goal);
-      ROS_INFO_THROTTLE(2.0, "Goal snapped to free cell: [%.2f, %.2f, %.2f]", p.x(), p.y(), p.z());
-    }
-
-    std::priority_queue<QueueNode, std::vector<QueueNode>, QueueNodeCompare> open_set;
-    std::unordered_map<GridIndex, double, GridIndexHash> g_score;
-    std::unordered_map<GridIndex, GridIndex, GridIndexHash> came_from;
-    std::unordered_set<GridIndex, GridIndexHash> closed_set;
-
-    g_score[start] = 0.0;
-    open_set.push(QueueNode{start, euclidean(start, goal), 0.0});
-    const std::vector<GridIndex> directions = makeDirections();
-    int iters = 0;
-
-    while (!open_set.empty() && iters < max_iterations_) {
-      const QueueNode current = open_set.top();
-      open_set.pop();
-      ++iters;
-      if (closed_set.find(current.idx) != closed_set.end()) continue;
-      closed_set.insert(current.idx);
-
-      if (current.idx == goal) {
-        // 只有序列号匹配时才发布（避免旧规划覆盖新规划）
-        if (this_plan_seq == plan_seq_) {
-            const auto cells = reconstructPath(came_from, current.idx);
-            publishPath(cells, frame_id_);
-            ROS_INFO("\033[1;32mA* path found in %d iterations. waypoints=%zu\033[0m", 
-                     iters, cells.size());
-            return true;
-        }
-    }
-
-      for (const auto & d : directions) {
-        GridIndex nbr{current.idx.x + d.x, current.idx.y + d.y, current.idx.z + d.z};
-        if (closed_set.find(nbr) != closed_set.end()) continue;
-        if (!isCellTraversable(nbr, robot_radius_, require_ground_support_,
-              strict_direct_ground_support_, ground_support_xy_radius_cells_,
-              ground_support_depth_cells_))
-          continue;
-
-        double tentative_g = current.g + euclidean(current.idx, nbr);
-        if (enable_preblocked_costmap_)
-          tentative_g += preblocked_costmap_weight_ * getPreblockedCost(nbr);
-
-        auto g_it = g_score.find(nbr);
-        if (g_it == g_score.end() || tentative_g < g_it->second) {
-          came_from[nbr] = current.idx;
-          g_score[nbr] = tentative_g;
-          open_set.push(QueueNode{nbr, tentative_g + euclidean(nbr, goal), tentative_g});
-        }
-      }
+    if (this_plan_seq == plan_seq_) {
+      publishPath(cells, frame_id_);
+      ROS_INFO("\033[1;32mA* path found. waypoints=%zu\033[0m", cells.size());
+      return true;
     }
     return false;
   }
 
-  void publishPath(const std::vector<GridIndex> & cells, const std::string & frame_id)
+  void publishPath(const std::vector<octo_planner::GridIndex> & cells, const std::string & frame_id)
   {
     nav_msgs::Path path_msg;
     path_msg.header.stamp = now();
@@ -831,7 +398,7 @@ private:
     m.pose.orientation.w = 1.0;
 
     for (std::size_t i = 0; i < cells.size(); ++i) {
-      const auto p = gridToWorld(cells[i]);
+      const auto p = planner_.gridToWorld(cells[i]);
       geometry_msgs::PoseStamped pose;
       pose.header = path_msg.header;
       pose.pose.position.x = p.x();
@@ -853,12 +420,13 @@ private:
 
   // ---- marker/cloud publishing ----
   void publishCellSetMarker(
-    const std::unordered_set<GridIndex, GridIndexHash> & cells,
+    const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
     ros::Publisher & publisher,
     const std::string & ns,
     float r_color, float g_color, float b_color, float a_color) const
   {
-    if (!octree_) return;
+    auto octree = planner_.getOctree();
+    if (!octree) return;
     visualization_msgs::Marker marker;
     marker.header.stamp = now();
     marker.header.frame_id = frame_id_;
@@ -867,7 +435,7 @@ private:
     marker.type = visualization_msgs::Marker::CUBE_LIST;
     marker.action = visualization_msgs::Marker::ADD;
     marker.pose.orientation.w = 1.0;
-    const double resolution = octree_->getResolution();
+    const double resolution = octree->getResolution();
     marker.scale.x = resolution;
     marker.scale.y = resolution;
     marker.scale.z = resolution;
@@ -877,7 +445,7 @@ private:
     marker.color.a = a_color;
     marker.points.reserve(cells.size());
     for (const auto & c : cells) {
-      const auto p = gridToWorld(c);
+      const auto p = planner_.gridToWorld(c);
       geometry_msgs::Point q;
       q.x = p.x(); q.y = p.y(); q.z = p.z();
       marker.points.push_back(q);
@@ -887,12 +455,13 @@ private:
 
   void publishPreblockedCellsMarker()
   {
-    publishCellSetMarker(preblocked_cells_, preblocked_marker_pub_,
+    publishCellSetMarker(planner_.getPreblockedCells(), preblocked_marker_pub_,
       "preblocked_cells", 0.15F, 0.35F, 1.0F, 0.95F);
   }
 
   void publishRiskCostCloud() const
   {
+    auto & costmap = planner_.getPreblockedCostmap();
     sensor_msgs::PointCloud2 cloud_msg;
     cloud_msg.header.stamp = now();
     cloud_msg.header.frame_id = frame_id_;
@@ -903,15 +472,15 @@ private:
       "y", 1, sensor_msgs::PointField::FLOAT32,
       "z", 1, sensor_msgs::PointField::FLOAT32,
       "intensity", 1, sensor_msgs::PointField::FLOAT32);
-    modifier.resize(preblocked_costmap_.size());
+    modifier.resize(costmap.size());
 
     sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
     sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
     sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
     sensor_msgs::PointCloud2Iterator<float> iter_i(cloud_msg, "intensity");
 
-    for (const auto & entry : preblocked_costmap_) {
-      const auto p = gridToWorld(entry.first);
+    for (const auto & entry : costmap) {
+      const auto p = planner_.gridToWorld(entry.first);
       *iter_x = p.x(); *iter_y = p.y(); *iter_z = p.z();
       *iter_i = static_cast<float>(entry.second);
       ++iter_x; ++iter_y; ++iter_z; ++iter_i;
@@ -919,7 +488,7 @@ private:
     risk_cost_pub_.publish(cloud_msg);
   }
 
-  // ---- node handles ----
+  // ---- ros handles ----
   ros::NodeHandle & nh_;
   ros::NodeHandle & pnh_;
 
@@ -929,27 +498,15 @@ private:
   std::string external_preblocked_marker_topic_, edited_occupied_marker_topic_;
   std::string traversable_marker_topic_, risk_cost_topic_;
   std::string frame_id_, map_id_, source_world_file_;
-  double robot_radius_;
-  int max_iterations_, snap_search_radius_cells_;
-  bool require_ground_support_, strict_direct_ground_support_;
-  int ground_support_xy_radius_cells_, ground_support_depth_cells_;
-  int max_step_height_cells_, robot_clearance_height_cells_;
   bool enable_preblocked_costmap_;
-  int preblocked_costmap_radius_cells_;
-  double preblocked_costmap_weight_;
-  bool lowest_traversable_only_;
 
   // ---- state ----
   bool map_ready_, has_start_, has_goal_, has_goal_pose_, planning_in_progress_;
   std::uint64_t plan_seq_, last_success_seq_, last_octomap_hash_;
   geometry_msgs::PointStamped start_point_, goal_point_;
   geometry_msgs::PoseStamped goal_pose_;
-  std::shared_ptr<octomap::OcTree> octree_;
-  GridIndex min_idx_, max_idx_;
-  std::unordered_set<GridIndex, GridIndexHash> traversable_cells_;
-  std::unordered_set<GridIndex, GridIndexHash> preblocked_cells_;
-  std::unordered_set<GridIndex, GridIndexHash> external_preblocked_cells_;
-  std::unordered_map<GridIndex, double, GridIndexHash> preblocked_costmap_;
+
+  octo_planner::OctoPlannerCore planner_;
 
   // ---- ros handles ----
   ros::Subscriber octomap_sub_, start_sub_, goal_sub_, goal_pose_sub_;
