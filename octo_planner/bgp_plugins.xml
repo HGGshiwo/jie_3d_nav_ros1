@@ -5,3 +5,12 @@
     </description>
   </class>
 </library>
+
+<library path="lib/libd1_local_planner_plugin">
+  <class name="octo_planner/D1LocalPlanner" type="octo_planner::D1LocalPlanner" base_class_type="nav_core::BaseLocalPlanner">
+    <description>
+      A local path follower plugin based on D1 controller proportional tracking.
+    </description>
+  </class>
+</library>
+
