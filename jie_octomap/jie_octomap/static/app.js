@@ -463,8 +463,7 @@ async function initDefaultMap() {
     if (cachedRoot && cachedName) {
         document.getElementById('root-path').value = cachedRoot;
         document.getElementById('map-name').value = cachedName;
-        console.log("【本地缓存】成功恢复上次加载的地图:", cachedRoot, cachedName);
-        await reloadMapFromServer(false);
+        console.log("【本地缓存】成功恢复上次配置路径:", cachedRoot, cachedName);
     } else {
         try {
             const res = await fetch('/api/default_map');
@@ -473,13 +472,16 @@ async function initDefaultMap() {
                 if (data.root_path && data.map_name) {
                     document.getElementById('root-path').value = data.root_path;
                     document.getElementById('map-name').value = data.map_name;
-                    await reloadMapFromServer(false);
                 }
             }
         } catch (err) {
             console.error("Failed to load default map config:", err);
         }
     }
+    
+    // 静默拉取当前 ROS 中活跃的地图数据（而不是触发重新读取磁盘包服务）
+    console.log("【网页初始化】静默拉取当前 ROS 活跃的地图数据...");
+    await reloadMapFromServer(true);
 }
 initDefaultMap();
 

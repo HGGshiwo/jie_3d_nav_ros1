@@ -1,0 +1,151 @@
+<launch>
+    <!-- Arguments for portability -->
+    <arg name="frame_prefix" default=""/>
+    <arg name="robot_name" default=""/>
+    <arg name="use_rviz" default="true"/>
+
+    <!-- 1. Path to a pre-built static global octomap file (.ot or .bt). 
+         If left empty, the node will convert the 2D grid map (/map) into a 3D global octomap. -->
+    <arg name="global_octomap_path" default=""/>
+    
+    <!-- 2. Real-time point cloud topic for local dynamic obstacle avoidance (e.g. /camera/depth/points or /velodyne_points) -->
+    <arg name="point_cloud_topic" default="camera/depth/points"/>
+
+    <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
+        <rosparam file="$(find jie_octomap)/config/move_base/costmap_common_params.yaml" command="load" ns="global_costmap" />
+        <rosparam file="$(find jie_octomap)/config/move_base/costmap_common_params.yaml" command="load" ns="local_costmap" />
+        <rosparam file="$(find jie_octomap)/config/move_base/local_costmap_params.yaml" command="load" />
+        <rosparam file="$(find jie_octomap)/config/move_base/global_costmap_params.yaml" command="load" />
+        <rosparam file="$(find jie_octomap)/config/move_base/move_base_params.yaml" command="load" />
+        
+        <param name="base_global_planner" value="octo_planner/OctoGlobalPlanner"/>
+        <param name="base_local_planner" value="octo_planner/OctoLocalPlanner"/>
+        
+        <!-- Pass topics dynamically from arguments -->
+        <param name="OctoGlobalPlanner/octomap_topic" value="/octomap_global"/>
+        <param name="OctoLocalPlanner/octomap_topic" value="/octomap_local"/>
+
+        <rosparam>                                                                                                                                    
+            OctoGlobalPlanner:                                                                                                                          
+                robot_radius: 0.25                                                                                                                        
+                require_ground_support: true                                                                                                              
+                strict_direct_ground_support: false                                                                                                       
+                snap_search_radius_cells: 12                                                                                                              
+
+            OctoLocalPlanner:
+                # 3D local planning parameters
+                robot_radius: 0.25
+                require_ground_support: true
+                strict_direct_ground_support: false
+                ground_support_xy_radius_cells: 1
+                ground_support_depth_cells: 2
+                max_step_height_cells: 1
+                robot_clearance_height_cells: 0
+                snap_search_radius_cells: 8
+
+                # 3D Elastic Band parameters
+                eb_iterations: 30
+                eb_w_smooth: 0.3
+                eb_w_obstacle: 0.5
+                eb_w_ground: 0.4
+                eb_safe_distance: 0.30
+                eb_learning_rate: 0.1
+
+                # Path tracking geometry
+                robot_center_offset_frame: odin1_base_link
+                robot_center_offset_x: -0.18
+                robot_center_offset_y: 0.0
+                robot_center_offset_z: 0.0
+                tracking_point_reached_xy_tolerance: 0.40
+                tracking_point_marker_scale: 0.28
+
+                # OpenCV top-down debug view
+                enable_tracking_debug_view: true
+                tracking_debug_view_size_px: 640
+                tracking_debug_view_pixels_per_meter: 80.0
+                tracking_debug_view_frequency: 10.0
+
+                # Speed tracking gains
+                linear_gain: 1.0
+                lateral_gain: 0.8
+                heading_gain: 0.8
+                cross_track_angular_gain: 0.5
+                final_yaw_gain: 0.3
+
+                # Motion mode and limits
+                enable_lateral_motion: true
+                max_linear_speed: 0.7
+                max_lateral_speed: 0.5
+                max_angular_speed: 0.9
+
+                # Deadbands and goal tolerances
+                align_final_yaw: true
+                linear_deadband: 0.05
+                lateral_deadband: 0.05
+                angular_deadband: 0.05
+                goal_position_tolerance: 0.1
+                goal_yaw_tolerance: 0.2
+        </rosparam>               
+
+        <!-- explicitly define frame ids for movebase -->
+        <param name="global_costmap/global_frame"                   value="$(arg frame_prefix)map"/>
+        <param name="global_costmap/robot_base_frame"               value="$(arg frame_prefix)base_footprint"/>
+        <param name="global_costmap/2d_obstacles_layer/scan/topic"  value="$(arg robot_name)scan"/>
+        <param name="global_costmap/3d_obstacles_layer/depth/topic" value="$(arg robot_name)camera/depth/points"/>
+        <param name="local_costmap/global_frame"                    value="$(arg frame_prefix)odom"/>
+        <param name="local_costmap/robot_base_frame"                value="$(arg frame_prefix)base_footprint"/>
+        <param name="local_costmap/2d_obstacles_layer/scan/topic"   value="$(arg robot_name)scan"/>
+        <param name="local_costmap/3d_obstacles_layer/depth/topic"  value="$(arg robot_name)camera/depth/points"/>
+    </node>
+    <!-- Case A: Load pre-built global static octomap package if path is specified -->
+    <node unless="$(eval arg('global_octomap_path') == '')" pkg="jie_octomap" type="map_package_manager.py" name="global_map_package_manager" output="screen">
+        <param name="autoload_package_path" value="$(arg global_octomap_path)" />
+        <param name="octomap_topic" value="/octomap_global" />
+        <param name="occupied_marker_topic" value="/octomap_global_markers" />
+    </node>
+
+    <!-- Case B: Convert 2D map to 3D global octomap if no static file is specified -->
+    <node if="$(eval arg('global_octomap_path') == '')" pkg="jie_octomap" type="occupancy_grid_to_octomap_node" name="occupancy_grid_to_octomap" output="screen">                             
+        <param name="grid_topic" value="/map" />                                                                                             
+        <param name="octomap_topic" value="/octomap_global" />                                                                                                                                                                                       
+        <param name="frame_id" value="map" />                                                                                                                                                                                                                                          
+        <param name="octomap_resolution" value="0.2" />                                                                                                                                                                                                     
+        <param name="wall_height_m" value="1.0" />                                                                                                                                                                                                  
+        <param name="floor_z_m" value="0.0" />                                                                                                                                                                                                       
+        <param name="occupied_threshold" value="50" />                                                                                            
+    </node>
+
+    <!-- Local Dynamic Octomap Generator (from Sensor PointCloud2) -->
+    <node pkg="octomap_server" type="octomap_server_node" name="octomap_server" output="screen">
+        <param name="resolution" value="0.10" />
+        <param name="frame_id" type="string" value="map" />
+        <param name="sensor_model/max_range" value="5.0" />
+        <param name="filter_ground" value="true" />
+        <remap from="cloud_in" to="$(arg point_cloud_topic)" />
+        <remap from="octomap_binary" to="/octomap_local" />
+    </node>
+
+    <!-- Global Map Markers for RViz and Web UI (Unconditional) -->
+    <node pkg="jie_octomap" type="octomap_to_occupied_markers_node" 
+        name="global_octomap_markers" output="screen">
+        <param name="octomap_topic" value="/octomap_global" />
+        <param name="marker_topic" value="/octomap_global_markers" />
+    </node>
+
+    <!-- Local Map Markers for RViz -->
+    <node if="$(arg use_rviz)" pkg="jie_octomap" type="octomap_to_occupied_markers_node" 
+        name="local_octomap_markers" output="screen">
+        <param name="octomap_topic" value="/octomap_local" />
+        <param name="marker_topic" value="/octomap_local_markers" />
+    </node>
+
+    <!-- Map Viewer Web Server (FastAPI) -->
+    <node pkg="jie_octomap" type="map_viewer_server" name="map_viewer_server" output="screen">
+        <param name="occupied_marker_topic" value="/octomap_global_markers" />
+        <param name="path_topic" value="/planned_path" />
+        <param name="odom_topic" value="/loc_base" />
+    </node>
+
+    <!-- RViz Node -->
+    <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(find jie_octomap)/config/rviz/go2.rviz" required="true" />
+</launch>

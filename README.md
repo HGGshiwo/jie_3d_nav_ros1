@@ -89,6 +89,22 @@ sudo apt-get install -y fonts-wqy-zenhei fonts-wqy-microhei
 - 使用 Web 页面查看 OctoMap、选择起点/终点并进行路径规划。
 - 提供面向安装了留形科技 Odin 1 的 智元 D1 机器狗的导航入口和独立网页测试入口。
 
+### 最新功能与性能更新 (2026/08)
+
+#### 1. 3D 可通行性算法修复与升级
+* **八叉树剪枝兼容性修复**：解决了在离线 PCD 导入的已剪枝（Pruned）大尺寸节点地图上，平坦地面边缘区域可通行图层缺失的 Bug。
+* **顶表面细分网格投影**：重构了候选网格生成逻辑，自动根据叶子节点在三维空间中横跨的分辨率尺寸进行 $K \times K$ 顶表面网格细分并投影检测，实现了静态可通行图层的完美完整覆盖。
+
+#### 2. A* 寻路性能大幅提升 (100x+ 加速)
+* **预计算哈希表查表优化**：重构了 A* 寻路及起点/终点吸附的邻居节点检测逻辑，寻路时直接对预计算图层 `traversable_cells_` 进行 $O(1)$ 的哈希检索，替代了原先单次迭代内包含上百次八叉树（Octomap）树状寻址的碰撞和支撑计算。
+* **毫秒级路径规划**：寻路耗时缩短至**毫秒级/微秒级（< 1ms）**，彻底避免了因 A* 在断路/长路径下超时计算导致 ROS 单线程 Spinner 阻塞并卡死网页的情况。
+* **线程安全保障**：底层核心解算器全公共接口接入 `std::recursive_mutex` 递归互斥锁，确保多线程并发访问/Marker图层复制时的绝对线程安全，消除段错误崩溃（exit code -11）。
+
+#### 3. Web 交互与操作体验升级
+* **第一人称视线自转（Minecraft 视角）**：网页端鼠标旋转操作由原本绕 `(0, 0, 0)` 的轨道公转改为了基于相机当前坐标自转的 FPS 视角，配合 W/S/A/D/E/Q 控制实现真实的飞蝇相机操作感；自动过滤屏蔽画布区域右键菜单。
+* **画笔高度自适应与自动聚焦**：地图载入时，相机镜头自动平移对齐点云几何中心，同时自动提取地面平均高度并初始化 Z 轴平面绘图高度，开箱即用。
+* **全链路动态诊断支持**：调试接口新增 `is_candidate` 与 `is_traversable` 字段，配合调试面板与一键复制功能，支持实时点击任意网格诊断其在重构算法中的流转状态。
+
 ---
 
 ## 介绍视频
@@ -368,3 +384,20 @@ roslaunch jie_octomap odin1_loc.launch
 
 > [!NOTE]
 > 其中 `odin1_slam.launch` and `odin1_loc.launch` 面向留形科技 Odin 1 空间定位模组流程，运行时需要确保 ROS 1 环境中已有 `odin_ros_driver`，并可选使用 `odin_costmap` 插件配置。 
+
+---
+
+## 三维弹性带局部规划器插件 (OctoLocalPlanner)
+
+本项目提供了一个基于 3D 物理弹性带（Elastic Band）优化的 `move_base` 局部路径规划器插件（`octo_planner/OctoLocalPlanner`）。
+
+### 运行命令
+一键启动 3D 导航模块（含 move_base、点云转局部 Octomap、2D地图转全局 Octomap 及 RViz 可视化）：
+```bash
+roslaunch jie_octomap move_base.launch [global_octomap_path:=/path/to/global_map.bt] [point_cloud_topic:=camera/depth/points] [use_rviz:=true]
+```
+
+#### 参数说明
+* `global_octomap_path`：可选。由 `jie_octomap` 生成并保存的先验静态 3D 地图包（Map Package）文件夹的绝对路径。若留空，则自动由 2D 栅格地图实时转换生成。
+* `point_cloud_topic`：输入的实时点云话题（如相机 `/camera/depth/points` 或雷达 `/velodyne_points`），用于实时生成局部避障八叉树。
+* `use_rviz`：是否开启 RViz 可视化。开启后将自动在 RViz 显示全局/局部 Octomap 标记和优化后的三维局部规划轨迹（绿色）。

@@ -94,6 +94,16 @@ target_link_libraries(d1_local_planner_plugin
 )
 add_dependencies(d1_local_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
+# ---- octo_local_planner_plugin ----
+add_library(octo_local_planner_plugin src/octo_local_planner.cpp)
+target_link_libraries(octo_local_planner_plugin
+  octo_planner_core
+  ${catkin_LIBRARIES}
+  ${OCTOMAP_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+add_dependencies(octo_local_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
 # ---- test_map_to_odom_tf_node ----
 add_executable(test_map_to_odom_tf_node src/test_map_to_odom_tf_node.cpp)
 target_link_libraries(test_map_to_odom_tf_node ${catkin_LIBRARIES})
@@ -103,6 +113,7 @@ install(TARGETS
   octo_planner_core
   octo_global_planner_plugin
   d1_local_planner_plugin
+  octo_local_planner_plugin
   jie_path_node
   d1_controller
   test_map_to_odom_tf_node

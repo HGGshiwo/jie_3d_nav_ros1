@@ -16,7 +16,8 @@ import rospy
 import tf2_ros
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, PointStamped, PoseStamped
-from nav_msgs.msg import Path as ROSPath
+from nav_msgs.msg import Path as ROSPath, Odometry
+from move_base_msgs.msg import MoveBaseActionGoal
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs.point_cloud2 as pc2
 import time
@@ -60,9 +61,16 @@ latest_ros_data = {
 # 全局存储最新规划好的路径点
 latest_planned_path = []
 
+# 全局存储最新里程计位姿
+latest_odom_pose = None
+
 # 地图更新版本控制（增量版本号，用于前端轻量级轮询同步）
 preblocked_version = 0
 occupied_version = 0
+
+def odom_callback(msg):
+    global latest_odom_pose
+    latest_odom_pose = msg.pose.pose
 
 def path_callback(msg):
     global latest_planned_path
@@ -139,16 +147,29 @@ def startup_event():
         ros_pubs["goal_pub"] = rospy.Publisher("/goal_point", PointStamped, queue_size=1, latch=True)
         ros_pubs["goal_pose_pub"] = rospy.Publisher("/goal_pose", PoseStamped, queue_size=1, latch=True)
         
+        # move_base standard goal publishers
+        ros_pubs["move_base_simple_goal"] = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=1, latch=True)
+        ros_pubs["move_base_action_goal"] = rospy.Publisher("/move_base/goal", MoveBaseActionGoal, queue_size=1, latch=True)
+        
+        # 获取话题名称参数
+        occupied_topic = rospy.get_param("~occupied_marker_topic", "/octomap_occupied_markers")
+        preblocked_topic = rospy.get_param("~preblocked_marker_topic", "/preblocked_cells_markers")
+        traversable_topic = rospy.get_param("~traversable_marker_topic", "/traversable_cells_markers")
+        risk_cost_topic = rospy.get_param("~risk_cost_topic", "/risk_cost_cells")
+        path_topic = rospy.get_param("~path_topic", "/planned_path")
+        odom_topic = rospy.get_param("~odom_topic", "/loc_base")
+        
         # 初始化 TF2 监听器
         tf_buffer = tf2_ros.Buffer()
         tf_listener = tf2_ros.TransformListener(tf_buffer)
         
-        rospy.Subscriber("/octomap_occupied_markers", Marker, occupied_callback)
-        rospy.Subscriber("/preblocked_cells_markers", Marker, preblocked_callback)
-        rospy.Subscriber("/traversable_cells_markers", Marker, traversable_callback)
-        rospy.Subscriber("/risk_cost_cells", PointCloud2, risk_cost_callback)
-        rospy.Subscriber("/planned_path", ROSPath, path_callback)
-        print("ROS 节点已启动，订阅者、发布者与 TF 监听器就绪")
+        rospy.Subscriber(occupied_topic, Marker, occupied_callback)
+        rospy.Subscriber(preblocked_topic, Marker, preblocked_callback)
+        rospy.Subscriber(traversable_topic, Marker, traversable_callback)
+        rospy.Subscriber(risk_cost_topic, PointCloud2, risk_cost_callback)
+        rospy.Subscriber(path_topic, ROSPath, path_callback)
+        rospy.Subscriber(odom_topic, Odometry, odom_callback)
+        print(f"ROS 节点已启动，里程计({odom_topic})、地图({occupied_topic})与发布者就绪")
     except Exception as e:
         print(f"ROS 初始化警告 (非ROS环境可忽略): {e}")
 
@@ -494,12 +515,26 @@ async def set_start(req: PointRequest):
 @app.post("/api/set_goal")
 async def set_goal(req: PointRequest):
     if "goal_pub" in ros_pubs and "goal_pose_pub" in ros_pubs:
-        # 1. 尝试从 TF 获取机器人当前位置，并发布为起点以自动激活路径规划
-        global tf_buffer
-        tf_success = False
-        if tf_buffer is not None:
+        # 1. 优先从 /loc_base 里程计缓存获取机器人位置，无则使用 TF，最后手动保底
+        global latest_odom_pose, tf_buffer
+        start_source = None
+        
+        if latest_odom_pose is not None:
+            try:
+                msg_start = PointStamped()
+                msg_start.header.frame_id = "map"
+                msg_start.header.stamp = rospy.Time.now()
+                msg_start.point.x = latest_odom_pose.position.x
+                msg_start.point.y = latest_odom_pose.position.y
+                msg_start.point.z = latest_odom_pose.position.z
+                ros_pubs["start_pub"].publish(msg_start)
+                start_source = "Odom(/loc_base)"
+                print(f"自动从 Odom(/loc_base) 读取当前位置并发布为起点: [{msg_start.point.x:.2f}, {msg_start.point.y:.2f}, {msg_start.point.z:.2f}]")
+            except Exception as e:
+                print(f"基于 Odom 发布起点失败: {e}")
+                
+        if start_source is None and tf_buffer is not None:
             def lookup_tf():
-                # 优先读取 ROS 参数服务器配置，若无则尝试该工作空间下常见的底盘坐标系
                 parent_frame = rospy.get_param("~tf_parent_frame", "map")
                 default_child = rospy.get_param("~tf_child_frame", "base_footprint")
                 candidate_children = [default_child, "odin1_base_link", "base_link"]
@@ -507,7 +542,6 @@ async def set_goal(req: PointRequest):
                 trans = None
                 for child in candidate_children:
                     try:
-                        # 快速检索各坐标系（超时设为 0.15s，防止接口阻塞）
                         trans = tf_buffer.lookup_transform(parent_frame, child, rospy.Time(0), rospy.Duration(0.15))
                         break
                     except Exception:
@@ -530,6 +564,7 @@ async def set_goal(req: PointRequest):
 
             tf_success, t = await run_in_thread(lookup_tf)
             if tf_success and t:
+                start_source = "TF"
                 print(f"自动从 TF 读取机器人当前位置并发布为起点: [{t.x:.2f}, {t.y:.2f}, {t.z:.2f}]")
             else:
                 print("自动获取机器人 TF 起点位置失败 (未找到 map -> base_footprint/odin1_base_link/base_link 变换)")
@@ -552,11 +587,29 @@ async def set_goal(req: PointRequest):
         msg_pose.pose.orientation.w = 1.0
         ros_pubs["goal_pose_pub"].publish(msg_pose)
         
+        # 3. 同时发布到 move_base 的简单目标与动作目标话题
+        if "move_base_simple_goal" in ros_pubs:
+            try:
+                ros_pubs["move_base_simple_goal"].publish(msg_pose)
+            except Exception as e:
+                print(f"发布 move_base_simple_goal 失败: {e}")
+                
+        if "move_base_action_goal" in ros_pubs:
+            try:
+                action_goal = MoveBaseActionGoal()
+                action_goal.header.stamp = rospy.Time.now()
+                action_goal.goal_id.stamp = rospy.Time.now()
+                action_goal.goal_id.id = f"web_goal_{time.time()}"
+                action_goal.goal.target_pose = msg_pose
+                ros_pubs["move_base_action_goal"].publish(action_goal)
+            except Exception as e:
+                print(f"发布 move_base_action_goal 失败: {e}")
+        
         msg_txt = f"终点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"
-        if tf_success:
-            msg_txt += " (已自动从 TF 获取机器人当前位置作为起点并触发规划)"
+        if start_source:
+            msg_txt += f" (已自动从 {start_source} 获取机器人当前位置作为起点并触发规划)"
         else:
-            msg_txt += " (TF 暂不可用，已通过之前设定的手动起点触发规划)"
+            msg_txt += " (里程计与 TF 均不可用，已通过之前设定的手动起点触发规划)"
             
         return {"status": "success", "message": msg_txt}
     else:

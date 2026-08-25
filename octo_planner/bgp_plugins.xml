@@ -14,3 +14,12 @@
   </class>
 </library>
 
+<library path="lib/libocto_local_planner_plugin">
+  <class name="octo_planner/OctoLocalPlanner" type="octo_planner::OctoLocalPlanner" base_class_type="nav_core::BaseLocalPlanner">
+    <description>
+      A self-contained 3D Elastic Band local planner plugin using Octomap and D1 tracking.
+    </description>
+  </class>
+</library>
+
+
