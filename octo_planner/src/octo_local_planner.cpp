@@ -45,8 +45,6 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
 
   // Read frames
   private_nh.param<std::string>("map_frame",                    map_frame_,                    "map");
-  private_nh.param<std::string>("base_frame",                   base_frame_,                   "base_footprint");
-  private_nh.param<std::string>("base_frame_candidates",        base_frame_candidates_str_,    "odin1_base_link,base_link,base_footprint");
   private_nh.param<std::string>("robot_center_offset_frame",    robot_center_offset_frame_,    "odin1_base_link");
   private_nh.param<double>     ("robot_center_offset_x",        robot_center_offset_x_,        -0.18);
   private_nh.param<double>     ("robot_center_offset_y",        robot_center_offset_y_,         0.0);
@@ -117,6 +115,9 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   
   band_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("optimized_local_band", 1, /*latch=*/true);
 
+  // Initialize status publisher
+  status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
+
   if (enable_debug_view_)
   {
     const double debug_period = 1.0 / std::max(1.0, debug_view_frequency_);
@@ -137,7 +138,6 @@ void OctoLocalPlanner::onOctomap(const octomap_msgs::Octomap::ConstPtr & msg)
     return;
   }
   planner_.setOctree(octree);
-  planner_.rebuildAllLayers();
   map_ready_ = true;
 }
 
@@ -185,6 +185,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   if (global_plan_.empty())
   {
     ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: Global plan is empty.");
+    publishStatus("Local planner warning: Global plan is empty.");
     return false;
   }
 
@@ -192,6 +193,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   RobotPose2D robot_pose;
   if (!lookupRobotPose2D(robot_pose))
   {
+    publishStatus("Local planner failed: TF lookup robot pose failed.");
     return false;
   }
 
@@ -201,6 +203,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     geometry_msgs::PoseStamped final_pose_base;
     if (!transformToBase(global_plan_.back(), final_pose_base))
     {
+      publishStatus("Local planner failed: TF transform final pose failed.");
       return false;
     }
 
@@ -336,10 +339,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   last_cmd_vel_ = cmd_vel;
   publishTrackingPointMarker();
   
-  ROS_INFO_THROTTLE(1.0,
-    "OctoLocalPlanner: Track target: x=%.3f y=%.3f heading_err=%.3f cmd=(%.3f, %.3f, %.3f)",
-    target.base_x, target.base_y, heading_error, cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z);
-
+  publishStatus("Local planner: Tracking path.");
   return true;
 }
 
@@ -347,8 +347,48 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
 {
   if (band.size() < 3) return;
 
-  ros::Time start_time = ros::Time::now();
+  ros::WallTime start_time = ros::WallTime::now();
 
+  // 1. Calculate bounding box of the local band
+  double min_x = std::numeric_limits<double>::max();
+  double min_y = std::numeric_limits<double>::max();
+  double min_z = std::numeric_limits<double>::max();
+  double max_x = -std::numeric_limits<double>::max();
+  double max_y = -std::numeric_limits<double>::max();
+  double max_z = -std::numeric_limits<double>::max();
+  for (const auto& pose : band)
+  {
+    double x = pose.pose.position.x;
+    double y = pose.pose.position.y;
+    double z = pose.pose.position.z;
+    min_x = std::min(min_x, x);
+    min_y = std::min(min_y, y);
+    min_z = std::min(min_z, z);
+    max_x = std::max(max_x, x);
+    max_y = std::max(max_y, y);
+    max_z = std::max(max_z, z);
+  }
+
+  // Expand bounding box by safety distance plus a buffer margin
+  double margin = eb_safe_distance_ + 0.05;
+  octomap::point3d min_pt(min_x - margin, min_y - margin, min_z - margin);
+  octomap::point3d max_pt(max_x + margin, max_y + margin, max_z + margin);
+
+  // 2. Cache all occupied voxels inside this bounding box
+  std::vector<octomap::point3d> local_obstacles;
+  auto octree = planner_.getOctree();
+  if (octree)
+  {
+    for (auto it = octree->begin_leafs_bbx(min_pt, max_pt), end = octree->end_leafs_bbx(); it != end; ++it)
+    {
+      if (octree->isNodeOccupied(*it))
+      {
+        local_obstacles.push_back(it.getCoordinate());
+      }
+    }
+  }
+
+  // 3. Perform Elastic Band Optimization
   for (int iter = 0; iter < eb_iterations_; ++iter)
   {
     for (size_t i = 1; i < band.size() - 1; ++i)
@@ -357,14 +397,14 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
       octomap::point3d P_prev(band[i-1].pose.position.x, band[i-1].pose.position.y, band[i-1].pose.position.z);
       octomap::point3d P_next(band[i+1].pose.position.x, band[i+1].pose.position.y, band[i+1].pose.position.z);
 
-      // 1. Smoothness / Spring contraction force
+      // Smoothness / Spring contraction force
       octomap::point3d F_smooth = P_prev + P_next - P_i * 2.0;
 
-      // 2. Obstacle repulsive force
+      // Obstacle repulsive force using cached local_obstacles
       double distance = 0.0;
       octomap::point3d gradient(0, 0, 0);
       octomap::point3d F_obs(0, 0, 0);
-      if (getDistanceAndGradient(P_i, distance, gradient))
+      if (getDistanceAndGradient(P_i, local_obstacles, distance, gradient))
       {
         if (distance < eb_safe_distance_)
         {
@@ -372,7 +412,7 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
         }
       }
 
-      // 3. Ground support vertical force (snapping to nearest traversable voxel)
+      // Ground support vertical force (snapping to nearest traversable voxel)
       octomap::point3d F_ground(0, 0, 0);
       GridIndex cell_idx = planner_.worldToGrid(P_i.x(), P_i.y(), P_i.z());
       GridIndex snapped;
@@ -396,59 +436,37 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
     }
   }
 
-  ROS_DEBUG("Optimized local band in %.3f ms", (ros::Time::now() - start_time).toSec() * 1000.0);
+  double dt = (ros::WallTime::now() - start_time).toSec() * 1000.0;
+  ROS_INFO_THROTTLE(2.0, "OctoLocalPlanner: Optimized local band (size=%zu, obs_cached=%zu) in %.3f ms", 
+                    band.size(), local_obstacles.size(), dt);
 }
 
-bool OctoLocalPlanner::getDistanceAndGradient(const octomap::point3d& p, double& distance, octomap::point3d& gradient)
+bool OctoLocalPlanner::getDistanceAndGradient(const octomap::point3d& p, const std::vector<octomap::point3d>& obstacles, double& distance, octomap::point3d& gradient)
 {
-  auto octree = planner_.getOctree();
-  if (!octree) return false;
+  if (obstacles.empty()) return false;
 
-  GridIndex seed = planner_.worldToGrid(p.x(), p.y(), p.z());
   double min_dist_sq = std::numeric_limits<double>::max();
-  GridIndex nearest_obs;
+  octomap::point3d nearest_obs;
   bool found = false;
 
-  // Radial grid search for nearest occupied voxel
-  int R = 4; // at 0.1m cell resolution, 4 cells is 0.4 meters (fully covers safety distance)
-  for (int r = 0; r <= R; ++r)
+  // Query cached obstacles in O(N) simple arithmetic vector checks
+  for (const auto& obs : obstacles)
   {
-    bool found_at_this_radius = false;
-    for (int dz = -r; dz <= r; ++dz)
+    double dist_sq = (p - obs).norm_sq();
+    if (dist_sq < min_dist_sq)
     {
-      for (int dx = -r; dx <= r; ++dx)
-      {
-        for (int dy = -r; dy <= r; ++dy)
-        {
-          if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
-          GridIndex check_idx{seed.x + dx, seed.y + dy, seed.z + dz};
-          
-          octomap::point3d coord = planner_.gridToWorld(check_idx);
-          auto node = octree->search(coord);
-          if (node && octree->isNodeOccupied(node))
-          {
-            double dist_sq = (p - coord).norm_sq();
-            if (dist_sq < min_dist_sq)
-            {
-              min_dist_sq = dist_sq;
-              nearest_obs = check_idx;
-              found = true;
-              found_at_this_radius = true;
-            }
-          }
-        }
-      }
+      min_dist_sq = dist_sq;
+      nearest_obs = obs;
+      found = true;
     }
-    if (found_at_this_radius) break;
   }
 
   if (found)
   {
     distance = std::sqrt(min_dist_sq);
-    octomap::point3d obs_pos = planner_.gridToWorld(nearest_obs);
     if (distance > 1e-4)
     {
-      gradient = (p - obs_pos) * (1.0 / distance);
+      gradient = (p - nearest_obs) * (1.0 / distance);
     }
     else
     {
@@ -521,27 +539,23 @@ bool OctoLocalPlanner::selectTrackingTarget(TrackingTarget & target)
 
 bool OctoLocalPlanner::lookupRobotPose2D(RobotPose2D & robot_pose)
 {
-  std::string last_error;
-  for (const auto & base_frame : getBaseFrameCandidates()) {
-    try {
-      const auto tf = tf_buffer_->lookupTransform(map_frame_, base_frame, ros::Time(0), ros::Duration(0.05));
-      if (active_base_frame_ != base_frame) {
-        active_base_frame_ = base_frame;
-        ROS_INFO("OctoLocalPlanner: Using robot base frame for tracking: %s", base_frame.c_str());
-      }
-      robot_pose.x   = tf.transform.translation.x;
-      robot_pose.y   = tf.transform.translation.y;
-      robot_pose.z   = tf.transform.translation.z;
-      robot_pose.yaw = tf2::getYaw(tf.transform.rotation);
-      applyRobotCenterOffset(base_frame, robot_pose);
-      return true;
-    } catch (const tf2::TransformException & ex) {
-      last_error = ex.what();
-    }
+  if (!costmap_ros_) return false;
+  std::string base_frame = costmap_ros_->getBaseFrameID();
+
+  try {
+    const auto tf = tf_buffer_->lookupTransform(map_frame_, base_frame, ros::Time(0), ros::Duration(0.01));
+    robot_pose.x   = tf.transform.translation.x;
+    robot_pose.y   = tf.transform.translation.y;
+    robot_pose.z   = tf.transform.translation.z;
+    robot_pose.yaw = tf2::getYaw(tf.transform.rotation);
+    applyRobotCenterOffset(base_frame, robot_pose);
+    return true;
+  } catch (const tf2::TransformException & ex) {
+    ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: Lookup robot pose from %s to %s failed: %s",
+      map_frame_.c_str(), base_frame.c_str(), ex.what());
+    publishStatus("Local planner failed: TF lookup robot pose failed.");
+    return false;
   }
-  ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: Lookup robot pose from %s failed for all base_frame candidates. Last: %s",
-    map_frame_.c_str(), last_error.c_str());
-  return false;
 }
 
 double OctoLocalPlanner::xyDistanceToPlanPoint(const RobotPose2D & rp, int idx) const
@@ -571,33 +585,22 @@ bool OctoLocalPlanner::computeFinalYawErrorXY(const geometry_msgs::PoseStamped &
 
 bool OctoLocalPlanner::transformToBase(const geometry_msgs::PoseStamped & pose_in, geometry_msgs::PoseStamped & pose_out)
 {
-  RobotPose2D unused;
-  if (active_base_frame_.empty() && !lookupRobotPose2D(unused)) return false;
-  const std::string base_frame = active_base_frame_.empty() ? base_frame_ : active_base_frame_;
+  if (!costmap_ros_) return false;
+  std::string base_frame = costmap_ros_->getBaseFrameID();
+
   geometry_msgs::PoseStamped stamped = pose_in;
   if (stamped.header.frame_id.empty()) stamped.header.frame_id = map_frame_;
   stamped.header.stamp = ros::Time(0);
   try {
-    tf_buffer_->transform(stamped, pose_out, base_frame, ros::Duration(0.05));
+    tf_buffer_->transform(stamped, pose_out, base_frame, ros::Duration(0.01));
     applyRobotCenterOffsetToRelativePose(base_frame, pose_out);
     return true;
   } catch (const tf2::TransformException & ex) {
     ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: Transform %s -> %s failed: %s",
       stamped.header.frame_id.c_str(), base_frame.c_str(), ex.what());
+    publishStatus("Local planner failed: TF transform failed.");
     return false;
   }
-}
-
-std::vector<std::string> OctoLocalPlanner::getBaseFrameCandidates() const
-{
-  std::vector<std::string> candidates;
-  const auto add = [&](const std::string & f) {
-    if (!f.empty() && std::find(candidates.begin(), candidates.end(), f) == candidates.end())
-      candidates.push_back(f);
-  };
-  add(base_frame_);
-  for (const auto & f : splitCsv(base_frame_candidates_str_)) add(f);
-  return candidates;
 }
 
 bool OctoLocalPlanner::shouldApplyRobotCenterOffset(const std::string & frame) const
@@ -777,24 +780,16 @@ bool OctoLocalPlanner::drawFinalGoalYaw(
   return true;
 }
 
-std::vector<std::string> OctoLocalPlanner::splitCsv(const std::string & text)
-{
-  std::vector<std::string> parts; std::string cur;
-  for (const char ch : text) {
-    if (ch == ',') { const auto t = trim(cur); if (!t.empty()) parts.push_back(t); cur.clear(); }
-    else cur.push_back(ch);
-  }
-  const auto t = trim(cur); if (!t.empty()) parts.push_back(t);
-  return parts;
-}
 
-std::string OctoLocalPlanner::trim(const std::string & text)
+void OctoLocalPlanner::publishStatus(const std::string& status)
 {
-  std::size_t first = 0;
-  while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
-  std::size_t last = text.size();
-  while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1]))) --last;
-  return text.substr(first, last - first);
+  if (status != last_status_)
+  {
+    last_status_ = status;
+    std_msgs::String msg;
+    msg.data = status;
+    status_pub_.publish(msg);
+  }
 }
 
 } // namespace octo_planner

@@ -10,6 +10,7 @@
 #include <visualization_msgs/Marker.h>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
+#include <std_msgs/String.h>
 #include <string>
 #include <vector>
 #include <opencv2/opencv.hpp>
@@ -40,7 +41,7 @@ private:
 
   // 3D Elastic Band Optimization
   void optimizeElasticBand(std::vector<geometry_msgs::PoseStamped>& band);
-  bool getDistanceAndGradient(const octomap::point3d& p, double& distance, octomap::point3d& gradient);
+  bool getDistanceAndGradient(const octomap::point3d& p, const std::vector<octomap::point3d>& obstacles, double& distance, octomap::point3d& gradient);
 
   // Helper functions
   bool isFinalTrackingPointReached(const TrackingTarget & target) const;
@@ -74,8 +75,6 @@ private:
     const cv::Point & center, double ppm, double & yaw_error) const;
 
   // Static math & string helpers
-  static std::vector<std::string> splitCsv(const std::string & text);
-  static std::string trim(const std::string & text);
   static double clamp(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
   static double applyDeadband(double v, double db) { return std::abs(v) < db ? 0.0 : v; }
   static double normalizeAngle(double a) { return std::atan2(std::sin(a), std::cos(a)); }
@@ -91,13 +90,14 @@ private:
   ros::Subscriber octomap_sub_;
   ros::Publisher marker_pub_;
   ros::Publisher band_marker_pub_;
+  ros::Publisher status_pub_;
   ros::Timer debug_view_timer_;
 
   // OctoPlannerCore instance for local traversability & ground checks
   OctoPlannerCore planner_;
 
   // Parameters
-  std::string map_frame_, base_frame_, base_frame_candidates_str_;
+  std::string map_frame_;
   std::string robot_center_offset_frame_;
   double robot_center_offset_x_, robot_center_offset_y_, robot_center_offset_z_;
   double lookahead_distance_, tracking_xy_tol_, tracking_marker_scale_;
@@ -129,6 +129,9 @@ private:
   double eb_safe_distance_;
   double eb_learning_rate_;
 
+  // Helper status function
+  void publishStatus(const std::string& status);
+
   // Planner state
   std::vector<geometry_msgs::PoseStamped> global_plan_;
   std::vector<geometry_msgs::PoseStamped> optimized_local_plan_;
@@ -136,7 +139,7 @@ private:
   bool   pose_adjusting_;
   bool   goal_reached_;
   bool   debug_view_disabled_;
-  std::string active_base_frame_;
+  std::string last_status_;
   geometry_msgs::Twist last_cmd_vel_;
   std::recursive_mutex planner_mutex_;
 };

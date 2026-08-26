@@ -366,7 +366,35 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
   bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (traversable_cells_.find(seed) != traversable_cells_.end()) {
+
+  // A. Use cached traversability set if populated (for global planner compatibility)
+  if (!traversable_cells_.empty())
+  {
+    if (traversable_cells_.find(seed) != traversable_cells_.end()) {
+      out = seed; return true;
+    }
+    for (int r = 1; r <= radius_cells; ++r)
+      for (int dz = 0; dz <= r; ++dz)
+        for (int dx = -r; dx <= r; ++dx)
+          for (int dy = -r; dy <= r; ++dy) {
+            if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
+            GridIndex c1{seed.x + dx, seed.y + dy, seed.z + dz};
+            if (traversable_cells_.find(c1) != traversable_cells_.end()) {
+              out = c1; return true;
+            }
+            if (dz > 0) {
+              GridIndex c2{seed.x + dx, seed.y + dy, seed.z - dz};
+              if (traversable_cells_.find(c2) != traversable_cells_.end()) {
+                out = c2; return true;
+              }
+            }
+          }
+    return false;
+  }
+
+  // B. Fallback to on-the-fly checks if traversability set is empty (local planner mode)
+  if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth))
+  {
     out = seed; return true;
   }
   for (int r = 1; r <= radius_cells; ++r)
@@ -375,12 +403,12 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
         for (int dy = -r; dy <= r; ++dy) {
           if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
           GridIndex c1{seed.x + dx, seed.y + dy, seed.z + dz};
-          if (traversable_cells_.find(c1) != traversable_cells_.end()) {
+          if (isCellTraversable(c1, robot_radius, require_ground_support, strict, xy_r, depth)) {
             out = c1; return true;
           }
           if (dz > 0) {
             GridIndex c2{seed.x + dx, seed.y + dy, seed.z - dz};
-            if (traversable_cells_.find(c2) != traversable_cells_.end()) {
+            if (isCellTraversable(c2, robot_radius, require_ground_support, strict, xy_r, depth)) {
               out = c2; return true;
             }
           }
