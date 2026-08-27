@@ -6,6 +6,7 @@
 #include <octomap_msgs/conversions.h>
 #include <octomap_msgs/Octomap.h>
 #include <pluginlib/class_list_macros.h>
+#include <std_msgs/String.h>
 
 #include "octo_planner/octo_planner_core.h"
 
@@ -83,6 +84,9 @@ public:
     ros::NodeHandle move_base_nh("~");
     plan_pub_ = move_base_nh.advertise<nav_msgs::Path>("plan", 1, true);
 
+    // Initialize status publisher
+    status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
+
     initialized_ = true;
     ROS_INFO("OctoGlobalPlanner initialized successfully. Subscribed to octomap on: %s", octomap_topic.c_str());
   }
@@ -100,6 +104,7 @@ public:
     if (!map_ready_)
     {
       ROS_WARN_THROTTLE(2.0, "OctoGlobalPlanner cannot plan because Octomap is not ready.");
+      publishStatus("Global planner failed: Octomap is not ready.");
       return false;
     }
 
@@ -109,6 +114,7 @@ public:
     if (!ok)
     {
       ROS_WARN_THROTTLE(2.0, "OctoGlobalPlanner failed to find a plan: %s", error_msg.c_str());
+      publishStatus("Global planner failed: " + error_msg);
       return false;
     }
 
@@ -147,6 +153,7 @@ public:
     path_msg.poses = plan;
     plan_pub_.publish(path_msg);
 
+    publishStatus("Global planner: Path found successfully.");
     ROS_INFO_THROTTLE(1.0, "OctoGlobalPlanner: Path found with %zu points. Published to /move_base/plan", plan.size());
     return true;
   }
@@ -165,10 +172,23 @@ private:
     map_ready_ = true;
   }
 
+  void publishStatus(const std::string& status)
+  {
+    if (status != last_status_)
+    {
+      last_status_ = status;
+      std_msgs::String msg;
+      msg.data = status;
+      status_pub_.publish(msg);
+    }
+  }
+
   bool initialized_;
   bool map_ready_;
   ros::Subscriber octomap_sub_;
   ros::Publisher plan_pub_;
+  ros::Publisher status_pub_;
+  std::string last_status_;
   OctoPlannerCore planner_;
 };
 

@@ -31,6 +31,7 @@
                 require_ground_support: true                                                                                                              
                 strict_direct_ground_support: false                                                                                                       
                 snap_search_radius_cells: 12                                                                                                              
+                max_iterations: 500000
 
             OctoLocalPlanner:
                 # 3D local planning parameters
@@ -44,7 +45,7 @@
                 snap_search_radius_cells: 8
 
                 # 3D Elastic Band parameters
-                eb_iterations: 30
+                eb_iterations: 10
                 eb_w_smooth: 0.3
                 eb_w_obstacle: 0.5
                 eb_w_ground: 0.4
@@ -60,7 +61,7 @@
                 tracking_point_marker_scale: 0.28
 
                 # OpenCV top-down debug view
-                enable_tracking_debug_view: true
+                enable_tracking_debug_view: false
                 tracking_debug_view_size_px: 640
                 tracking_debug_view_pixels_per_meter: 80.0
                 tracking_debug_view_frequency: 10.0
