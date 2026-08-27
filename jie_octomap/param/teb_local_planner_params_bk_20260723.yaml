@@ -1,0 +1,164 @@
+TebLocalPlannerROS:
+
+  ##################################
+  # 1. 参考坐标系与话题
+  ##################################
+  odom_topic: /odometry/base          # (string) 接收里程计的Topic（机器人位姿与速度）
+  map_frame: /map           # (string) 用于规划的全局参考坐标系
+
+  ##################################
+  # 2. 轨迹设置
+  ##################################
+  teb_autosize: true        # (bool) 允许 TEB 自动调整轨迹时间窗
+  dt_ref: 0.2               # (double) 参考时间间隔；更密的轨迹采样有助于动态圆时序约束
+  dt_hysteresis: 0.02       # (double) 自适应时间离散的滞后量 [s]（通常约为 dt_ref 的 10%）
+  exact_arc_length: false   # (bool) 使用精确弧长计算（更精确但更慢）
+  publish_feedback: false   # (bool) 将优化反馈发布到 /move_base/feedback 以供外部监控
+
+  ##################################
+  # 3. 全局路径交互
+  ##################################
+  global_plan_overwrite_orientation: true   # (bool) 忽略全局路径的朝向，由 TEB 优化航向角
+  max_global_plan_lookahead_dist: 3.0       # (double) [m] 从全局路径考虑的最大前瞻距离（<=0 禁用）
+  global_plan_prune_distance: 0.5          # (double) [m] 剪除距机器人小於此距離的全局路徑點
+  global_plan_viapoint_sep: 0.5             # (double) [m] 全局路径引导點的最小間隔，保持稀疏以便早期动态绕行
+  via_points_ordered: true                   # (bool) 按全局路径原有顺序遵循途经点
+
+  ##################################
+  # 4. 可行性与初始化
+  ##################################
+  feasibility_check_no_poses: 4            # (int) 检查足够的后续位姿数量，以排除拐角抄近路的轨迹
+  min_resolution_collision_check_angular: 0.15 # (double) [rad] 转弯时对机器人占据空间的角度插值检查分辨率
+  allow_init_with_backwards_motion: false    # (bool) 若目标在后方，允许初始向后运动（需后方传感器）
+
+  ##################################
+  # 5. 机器人运动学与限制
+  ##################################
+  # 5.1 差动 / 全向 设置
+  max_vel_x: 1.0               # (double) [m/s] 最大前向速度
+  max_vel_x_backwards: 0.02     # (double) [m/s] 后退最大速度（设低以使后退为兜底行为）
+  max_vel_y: 0.0              # (double) 关闭全向速度优化以强制优先前向行驶
+  max_vel_theta: 1.0          # (double) [rad/s] 最大角速度，允许原地旋转而非缓慢后退
+  max_vel_trans: 1.0
+
+  acc_lim_x: 1.5               # (double) [m/s²] x 方向最大加速度
+  acc_lim_y: 0.0               # (double) [m/s²] 当 max_vel_y=0 时未使用；保留以备全向模式测试
+  acc_lim_theta: 2.0           # (double) [rad/s²] 角加速度限制，使机器人能快速建立朝前的航向
+
+  # 5.2 类车 / Ackermann 设置
+  min_turning_radius: 0        # (double) [m] 最小转弯半径（差动驱动设为0）
+  wheelbase: 0.8               # (double) [m] 前后轴距（类车机器人使用）
+  cmd_angle_instead_rotvel: false  # (bool) 将 cmd_vel/angular/z 解释为转向角而非角速度
+
+  ##################################
+  # 6. 机器人占据模型
+  ##################################
+  footprint_model:
+    type: "polygon"                            # (string) 占据模型类型：point, circular, two_circles, line, polygon
+    vertices:                                  # (array) 顶点列表 [x, y]（相对于机器人中心），自动闭合
+      - [ 0.4,  0.25]
+      - [ 0.4, -0.25]
+      - [-0.4, -0.25]
+      - [-0.4,  0.25]
+  is_footprint_dynamic: false                  # (bool) 若为 true，机器人占据可能动态变化（例如机械臂移动）
+
+  ##################################
+  # 7. 目标容差
+  ##################################
+  xy_goal_tolerance: 0.3        # (double) [m] 接受的平面距离误差
+  yaw_goal_tolerance: 0.785     # (double) [rad] 接受的航向误差（约 90°）
+  free_goal_vel: false          # (bool) 若为 false，目标处速度必须为零；防止通过目标时“高速冲过”
+
+  ##################################
+  # 8. 障碍物处理
+  ##################################
+  min_obstacle_dist: 0.2              # (double) [m] 与障碍物期望的最小距离
+  include_costmap_obstacles: true     # (bool) 在优化中使用局部代价地图中的障碍
+  costmap_obstacles_behind_robot_dist: 3.0  # (double) [m] 在全向或倒车时保留侧后方障碍的距离范围
+
+  obstacle_poses_affected: 20         # (int) 每个障碍点影响到的轨迹位姿数量
+  inflation_dist: 0.6                 # (double) [m] 静态障碍的膨胀距离（等同 costmap 膨胀半径）
+  dynamic_obstacle_inflation_dist: 1.1 # (double) [m] 动态障碍缓冲区半径，用于提前避让
+
+  include_dynamic_obstacles: true     # (bool) 考虑外部动态障碍（需要发布障碍消息）
+
+  obstacle_association_cutoff_factor: 8.0           # (double) 在障碍关联时保留附近角落几何的因子
+  obstacle_association_force_inclusion_factor: 3.0  # (double) 在当前最小距离下强制包含障碍的因子（例如近距离强制纳入）
+  legacy_obstacle_association: false                # (bool) 若为 true 使用旧的（较慢）障碍关联方法
+
+  ##################################
+  # 9. 优化参数
+  ##################################
+  no_inner_iterations: 6              # (int) 内部迭代次数，使动态障碍代价多一次精化
+  no_outer_iterations: 5              # (int) 外层迭代次数，以改善对早期圆形障碍绕行的收敛
+  optimization_activate: true         # (bool) 启用轨迹优化
+  optimization_verbose: false         # (bool) 在控制台打印详细优化信息
+  penalty_epsilon: 0.01               # (double) 惩罚项的数值稳定项，应小于 max_vel_x_backwards
+
+  # 运动学约束与权重
+  weight_max_vel_x: 1.0                # (double) 超过 max_vel_x 的惩罚权重
+  weight_max_vel_y: 1.0                # (double) 超过 max_vel_y 的惩罚权重
+  weight_max_vel_theta: 1.0            # (double) 超过 max_vel_theta 的惩罚权重
+
+  weight_acc_lim_x: 0.5                # (double) 超过 acc_lim_x 的惩罚权重
+  weight_acc_lim_y: 1.0                # (double) 超过 acc_lim_y 的惩罚权重
+  weight_acc_lim_theta: 1.0            # (double) 超过 acc_lim_theta 的惩罚权重
+
+  weight_kinematics_nh: 1000.0         # (double) 在 max_vel_y=0 时强制先转向再前进的运动学约束权重
+  weight_kinematics_forward_drive: 700.0 # (double) 优先前向行驶轨迹，避免对微小反向命令冻结
+  weight_kinematics_turning_radius: 1.0 # (double) 尊重最小转弯半径的权重（类车）
+
+  # 障碍与膨胀权重
+  weight_obstacle: 60.0                # (double) 静态障碍惩罚权重，增大可减少抄近路
+  weight_inflation: 1.0                # (double) 软清除惩罚，保持狭窄通道可行性
+  weight_dynamic_obstacle: 80.0        # (double) 动态障碍惩罚，预测圆形障碍重叠代价
+  weight_dynamic_obstacle_inflation: 1.0 # (double) 在动态缓冲区内的响应强度权重
+
+  # 时间与路径代价
+  weight_optimaltime: 5.0             # (double) 避免被迫选择穿越动态障碍的快速路径
+  weight_shortest_path: 0.0           # (double) 最短路径权重（0 表示忽略）
+  weight_viapoint: 5.0               # (double) 让本地绕行更早偏离被阻塞的中心线
+  selection_alternative_time_cost: true  # (bool) 比较候选类的转换时间，使等待不总是被偏好
+
+  ##################################
+  # 10. 同伦类规划（HCP）
+  ##################################
+  enable_homotopy_class_planning: true       # (bool) 在动态障碍周围生成空间替代路径
+  enable_multithreading: true               # (bool) 启用多线程，将同伦计算与障碍关联分线程运行
+  max_number_classes: 4                     # (int) 保留的最大类数（左右/全局候选及保留类）
+  h_signature_prescaler: 0.5                # (double) 同伦签名计算的缩放因子
+  h_signature_threshold: 0.1                # (double) 判断两个同伦签名是否相等的阈值
+
+  selection_cost_hysteresis: 1.0             # (double) 切换同伦类时的滞后惩罚
+  selection_prefer_initial_plan: 1.0         # (double) 不削弱初始/全局被阻塞类的优先级
+  selection_obst_cost_scale: 50.0            # (double) 强烈偏好清晰的左右绕行而非在被阻塞类等待
+  selection_viapoint_cost_scale: 0.5         # (double) 防止途经点在动态障碍附近主导候选选择
+  switching_blocking_period: 0.5             # (double) [s] 防止左右候选迅速切换的阻塞时间
+
+  simple_exploration: true                   # (bool) 确定性地在动态障碍附近生成左右候选
+  viapoints_all_candidates: true            # (bool) 允许所有候选在全局线外通过障碍
+  roadmap_graph_samples: 15               # (int) 路网采样数量用于初始猜测
+  roadmap_graph_area_width: 5.0              # (double) 路网采样区域宽度 [m]
+  obstacle_keypoint_offset: 0.2              # (double) [m] 生成障碍关键点的额外偏移
+  obstacle_heading_threshold: 0.0            # (double) 对关键点方向的阈值；0 表示不修剪侧向关键点，适用于左右绕行
+
+  ##################################
+  # 11. 恢复与振荡处理
+  ##################################
+  shrink_horizon_backup: true               # (bool) 当无可行解时尝试缩短时间窗口
+  shrink_horizon_min_duration: 10            # (double) [s] 当启用缩短时的最小时间窗
+
+  oscillation_recovery: true                 # (bool) 检测到振荡时启用恢复行为
+  oscillation_v_eps: 0.1                     # (double) [m/s] 检测振荡的速度阈值
+  oscillation_omega_eps: 0.1                 # (double) [rad/s] 检测振荡的角速度阈值
+  oscillation_filter_duration: 10            # (int) 监测振荡的迭代次数窗口
+  oscillation_recovery_min_duration: 10      # (int) 两次恢复之间最小等待迭代次数
+
+  ##################################
+  # 12. 代价地图转换器与路网
+  ##################################
+  costmap_converter_rate: 10                  # (int) [Hz] 运行 costmap_converter 的频率（将障碍转换为多边形）
+  costmap_converter_spin_thread: true        # (bool) 将 costmap_converter 放到单独线程提高效率
+
+  roadmap_graph_area_length_scale: 1.0        # (double) 路网采样区域长度的缩放因子
+

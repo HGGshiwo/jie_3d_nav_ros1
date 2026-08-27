@@ -1,0 +1,11 @@
+GlobalPlanner:
+  allow_unknown: true
+  default_tolerance: 0.1
+  visualize_potential: false
+  use_dijkstra: true
+  use_quadratic: false
+  use_grid_path: false
+  cost_factor: 0.55
+  neutral_cost: 50
+  lethal_cost: 253
+  outline_map: false #勾勒出包含致命障碍物的全局代价地图。若使用非静态（滚动窗口）全局代价地图，则需要将其设置为 false。

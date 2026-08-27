@@ -1,0 +1,28 @@
+footprint: [[0.4, 0.25], [0.4, -0.25], [-0.4, -0.25], [-0.4, 0.25]] 
+#robot_radius: 0.4
+
+obstacle_range: 3.0
+raytrace_range: 4.0
+
+static_layer:
+  enabled: true
+  map_topic: /map
+
+
+obstacle_layer:
+  enabled: true
+  track_unknown_space: true
+  combination_method: 1
+
+  obstacle_range: 3.0
+  raytrace_range: 4.0
+  inf_is_valid: true
+  observation_sources: scan
+  scan: {
+    data_type: LaserScan,
+    topic: /scan,
+    marking: true,
+    clearing: true,
+    inf_is_valid: true
+  }
+  

@@ -1,0 +1,2 @@
+gnome-terminal --window -e 'bash -c "source ~/catkin_ws2/devel/setup.bash && roslaunch jie_octomap move_base.launch; exec bash"' \
+# --tab -e 'bash -c "sleep 3;conda run -n unitree python /home/unitree/Documents/allgo/gitlab/zbrain/adapter/unitree/cmd_vel_to_sdk.py; exec bash"' 

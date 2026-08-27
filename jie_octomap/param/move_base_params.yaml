@@ -1,0 +1,28 @@
+
+shutdown_costmaps: false #当move_base在不活动状态时,是否关掉costmap
+controller_frequency: 10.0 #向底盘控制移动话题cmd_vel发送命令的频率.
+controller_patience: 15.0
+planner_frequency: 0.0  #The rate in Hz at which to run the global planning loop. If the frequency is set to 0.0, the global planner will only run when a new goal is received or the local planner reports that its path is blocked. 
+planner_patience: 5.0
+oscillation_timeout: 10.0  #如果出现摆动则说明全局规划失败，那么将在超时后执行恢复模块
+oscillation_distance: 0.1  #机器人必须移动多远（以米计）才能被视为不摆动。
+conservative_reset_dist: 3.0 #它表示机器人周围多远的距离超出该距离的障碍物将被清除，以便在地图中腾出空间
+
+recovery_behavior_enabled: true
+
+recovery_behaviors:
+  - name: 'clear_costmap'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+#  - name: 'rotate_recovery'
+#    type: 'rotate_recovery/RotateRecovery'
+
+clear_costmap:
+  reset_distance: 0.1
+
+rotate_recovery:
+  sim_granularity: 0.017
+  frequency: 10.0
+  acceleration_limit: 0.3
+
+
+

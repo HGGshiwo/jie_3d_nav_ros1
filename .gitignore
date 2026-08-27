@@ -41,3 +41,5 @@ Thumbs.db
 # Local environment files
 .env
 *.local
+
+.catkin_tools
