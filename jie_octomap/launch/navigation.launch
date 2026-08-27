@@ -1,7 +1,8 @@
 <launch>
     <include file="$(find jie_octomap)/launch/move_base.launch">
         <arg name="point_cloud_topic" value="/lidar_points"/>
-        <arg name="global_octomap_path" value="/home/unitree/map-segment "/>
+        <!-- <arg name="global_octomap_path" value="/home/unitree/map-segment "/> -->
+        <arg name="global_octomap_topic" value="/octomap_local"/>
         <arg name="use_rviz" value="true" />
     </include>
     <node pkg="tf2_ros" type="static_transform_publisher" name="lidar_to_hesai_broadcaster"

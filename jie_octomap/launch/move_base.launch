@@ -7,6 +7,7 @@
     <!-- 1. Path to a pre-built static global octomap file (.ot or .bt). 
          If left empty, the node will convert the 2D grid map (/map) into a 3D global octomap. -->
     <arg name="global_octomap_path" default=""/>
+    <arg name="global_octomap_topic" default="/octomap_global"/>
     
     <!-- 2. Real-time point cloud topic for local dynamic obstacle avoidance (e.g. /camera/depth/points or /velodyne_points) -->
     <arg name="point_cloud_topic" default="camera/depth/points"/>
@@ -22,7 +23,7 @@
         <param name="base_local_planner" value="octo_planner/OctoLocalPlanner"/>
         
         <!-- Pass topics dynamically from arguments -->
-        <param name="OctoGlobalPlanner/octomap_topic" value="/octomap_global"/>
+        <param name="OctoGlobalPlanner/octomap_topic" value="$(arg global_octomap_topic)"/>
         <param name="OctoLocalPlanner/octomap_topic" value="/octomap_local"/>
 
         <rosparam>                                                                                                                                    
