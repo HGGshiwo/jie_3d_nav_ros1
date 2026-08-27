@@ -708,7 +708,7 @@ async def get_default_map():
     return {"root_path": str(path.parent), "map_name": str(path.name)}
 
 def main():
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8008)
 
 if __name__ == "__main__":
     main()

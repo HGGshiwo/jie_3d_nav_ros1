@@ -388,7 +388,28 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
     }
   }
 
-  // 3. Perform Elastic Band Optimization
+  // 3. Perform Elastic Band Optimization                                                                                                                           
+  // 预先计算并缓存每个路径点的地面吸附坐标，避免在 10 次迭代中重复进行百万次八叉树搜索                                                                                     
+  std::vector<octomap::point3d> ground_snapped_positions(band.size());                                                                                                      
+  std::vector<bool> ground_snapped_valid(band.size(), false);                                                                                                               
+                                                                                                                                                                            
+  for (size_t i = 1; i < band.size() - 1; ++i)                                                                                                                              
+  {                                                                                                                                                                         
+    octomap::point3d P_i(band[i].pose.position.x, band[i].pose.position.y, band[i].pose.position.z);                                                                        
+    GridIndex cell_idx = planner_.worldToGrid(P_i.x(), P_i.y(), P_i.z());                                                                                                   
+    GridIndex snapped;                                                                                                                                                      
+    // 局部规划限制最大吸附半径为 4 格 (40cm)，防止产生巨大的搜索立方体                                                                                                     
+    int search_radius = std::min(4, snap_search_radius_cells_);                                                                                                             
+                                                                                                                                                                            
+    if (planner_.findNearestFreeCell(cell_idx, robot_radius_, search_radius,                                                                                                
+                                     require_ground_support_, strict_direct_ground_support_,                                                                                
+                                     ground_support_xy_radius_cells_, ground_support_depth_cells_, snapped))                                                                
+    {                                                                                                                                                                       
+      ground_snapped_positions[i] = planner_.gridToWorld(snapped);                                                                                                          
+      ground_snapped_valid[i] = true;                                                                                                                                       
+    }                                                                                                                                                                       
+  }         
+
   for (int iter = 0; iter < eb_iterations_; ++iter)
   {
     for (size_t i = 1; i < band.size() - 1; ++i)
@@ -412,16 +433,11 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
         }
       }
 
-      // Ground support vertical force (snapping to nearest traversable voxel)
+      // Ground support vertical force (using pre-calculated cached snap position)
       octomap::point3d F_ground(0, 0, 0);
-      GridIndex cell_idx = planner_.worldToGrid(P_i.x(), P_i.y(), P_i.z());
-      GridIndex snapped;
-      if (planner_.findNearestFreeCell(cell_idx, robot_radius_, snap_search_radius_cells_,
-                                       require_ground_support_, strict_direct_ground_support_,
-                                       ground_support_xy_radius_cells_, ground_support_depth_cells_, snapped))
+      if (ground_snapped_valid[i])
       {
-        octomap::point3d ground_pos = planner_.gridToWorld(snapped);
-        F_ground = ground_pos - P_i;
+        F_ground = ground_snapped_positions[i] - P_i;
       }
 
       // Combined Total Force
