@@ -150,6 +150,7 @@ public:
             std::string & error_msg);
 
   bool isInsideMetricBounds(const GridIndex & idx) const;
+  bool isOccupiedCell(const GridIndex & idx) const;
   bool isCellTraversable(const GridIndex & idx, double robot_radius,
                         bool require_ground_support, bool strict, int xy_r, int depth) const;
   bool findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
@@ -159,7 +160,6 @@ public:
 private:
   double euclidean(const GridIndex & a, const GridIndex & b) const;
   bool hasGroundSupport(const GridIndex & idx, bool strict, int xy_r, int depth) const;
-  bool isOccupiedCell(const GridIndex & idx) const;
   bool hasNonOccupiedNeighborSameLevel(const GridIndex & idx) const;
   bool hasSameLevelNeighborWithOccupiedBelow(const GridIndex & idx) const;
   bool hasSameLevelNeighborWithOccupiedAbove(const GridIndex & idx) const;

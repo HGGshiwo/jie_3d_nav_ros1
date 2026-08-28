@@ -1,0 +1,29 @@
+<launch>
+    <!-- Parameters for testing -->
+    <arg name="pc_topic" default="/lidar_points"/>
+    <arg name="octomap_topic" default="/octomap_local"/>
+    <arg name="rate" default="10.0"/>
+
+    <!-- 1. Fake High-Density Point Cloud Publisher -->
+    <node pkg="octo_planner" type="fake_pointcloud_publisher.py" name="fake_pointcloud_pub" output="screen">
+        <param name="topic" value="$(arg pc_topic)"/>
+        <param name="frame_id" value="map"/>
+        <param name="rate" value="$(arg rate)"/>
+    </node>
+
+    <!-- 2. Octomap Server Node (Main Mapping Pipeline) -->
+    <node pkg="octomap_server" type="octomap_server_node" name="octomap_server_bench" output="screen">
+        <param name="resolution" value="0.10" />
+        <param name="frame_id" type="string" value="map" />
+        <param name="sensor_model/max_range" value="5.0" />
+        <param name="filter_ground" value="false" />
+        <remap from="cloud_in" to="$(arg pc_topic)" />
+        <remap from="octomap_binary" to="$(arg octomap_topic)" />
+    </node>
+
+    <!-- 3. Mapping Performance Benchmark Node -->
+    <node pkg="octo_planner" type="benchmark_mapping.py" name="mapping_benchmark" output="screen">
+        <param name="pc_topic" value="$(arg pc_topic)"/>
+        <param name="octomap_topic" value="$(arg octomap_topic)"/>
+    </node>
+</launch>

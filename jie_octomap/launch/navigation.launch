@@ -1,12 +1,17 @@
 <launch>
+    <!-- 局部地图使用的点云 -->
+    <arg name="point_cloud_topic" default="/lidar_points" />
     <include file="$(find jie_octomap)/launch/move_base.launch">
-        <arg name="point_cloud_topic" value="/lidar_points"/>
+        <arg name="point_cloud_topic" value="$(arg point_cloud_topic)"/>
         <!-- <arg name="global_octomap_path" value="/home/unitree/map-segment "/> -->
-        <arg name="global_octomap_topic" value="/octomap_local"/>
+        <!-- <arg name="map_topic" value="/map"/> -->
+        <!-- <arg name="global_octomap_topic" value="/octomap_local"/> -->
+
         <arg name="use_rviz" value="true" />
     </include>
     <node pkg="tf2_ros" type="static_transform_publisher" name="lidar_to_hesai_broadcaster"
           args="0 0 0 0 0 0 lidar hesai_lidar" required="true" />
-
-    <node pkg="tf" type="static_transform_publisher" name="footprint_broadcaster" args="0 0 0 0 0 0 base_link base_footprint 10" launch-prefix="taskset -c 2"/>
+    
+    <!-- 这里在实机上需要开启 -->
+    <!-- <node pkg="tf" type="static_transform_publisher" name="footprint_broadcaster" args="0 0 0 0 0 0 base_link base_footprint 10" launch-prefix="taskset -c 2"/> -->
 </launch>

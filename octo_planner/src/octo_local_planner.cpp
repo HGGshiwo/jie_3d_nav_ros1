@@ -1,6 +1,9 @@
 #include "octo_planner/octo_local_planner.h"
 #include <pluginlib/class_list_macros.h>
 #include <tf2/utils.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <algorithm>
 #include <cmath>
@@ -19,6 +22,8 @@ OctoLocalPlanner::OctoLocalPlanner()
   costmap_ros_(nullptr),
   initialized_(false),
   map_ready_(false),
+  map_changed_(true),
+  last_local_rebuild_time_(0),
   target_index_(0),
   pose_adjusting_(false),
   goal_reached_(true),
@@ -118,6 +123,14 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   // Initialize status publisher
   status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
 
+  // Advertise debug image topic
+  debug_image_pub_ = private_nh.advertise<sensor_msgs::Image>("debug_image", 1, true);
+
+  // Advertise costmap/traversability debug visualization topics
+  traversable_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("traversable_cells", 1, true);
+  preblocked_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("preblocked_cells", 1, true);
+  risk_cost_pub_ = private_nh.advertise<sensor_msgs::PointCloud2>("risk_cost_cloud", 1, true);
+
   if (enable_debug_view_)
   {
     const double debug_period = 1.0 / std::max(1.0, debug_view_frequency_);
@@ -139,6 +152,7 @@ void OctoLocalPlanner::onOctomap(const octomap_msgs::Octomap::ConstPtr & msg)
   }
   planner_.setOctree(octree);
   map_ready_ = true;
+  map_changed_ = true; // Mark map as changed; deferred rebuild will run in control loop
 }
 
 bool OctoLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
@@ -274,6 +288,25 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   // Run 3D Elastic Band Optimization
   if (local_band.size() >= 3 && map_ready_)
   {
+    // Lazily rebuild preblocked cells for local planner if map updated and throttled (max 4Hz)
+    ros::Time now = ros::Time::now();
+    if (map_changed_ && (now - last_local_rebuild_time_).toSec() >= 0.25)
+    {
+      planner_.rebuildPreblockedCells(); // Ultra fast (<1ms)!
+      map_changed_ = false;
+      last_local_rebuild_time_ = now;
+      
+      // On-demand visualization publishing for RViz
+      bool need_vis = (traversable_marker_pub_.getNumSubscribers() > 0 ||
+                       preblocked_marker_pub_.getNumSubscribers() > 0 ||
+                       risk_cost_pub_.getNumSubscribers() > 0);
+      if (need_vis) {
+        publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", map_frame_, 0.20F, 0.95F, 0.55F, 0.55F);
+        publishCellSetMarker(planner_.getPreblockedCells(), preblocked_marker_pub_, "preblocked_cells", map_frame_, 0.15F, 0.35F, 1.0F, 0.95F);
+        publishRiskCostCloud(map_frame_);
+      }
+    }
+
     optimizeElasticBand(local_band);
     optimized_local_plan_ = local_band;
     publishLocalBandMarkers(optimized_local_plan_);
@@ -326,7 +359,9 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
   // Proportional Control Command
   const double heading_error = std::atan2(target.base_y, std::max(1.0e-6, target.base_x));
-  cmd_vel.linear.x  = clamp(target.base_x * linear_gain_,  -max_linear_speed_,  max_linear_speed_);
+  // Scale down forward speed when heading error is large to prevent charging straight into obstacles before turning
+  const double heading_factor = std::max(0.0, std::cos(heading_error));
+  cmd_vel.linear.x  = clamp(target.base_x * linear_gain_ * heading_factor, -max_linear_speed_, max_linear_speed_);
   cmd_vel.linear.y  = enable_lateral_motion_
                       ? clamp(target.base_y * lateral_gain_, -max_lateral_speed_, max_lateral_speed_)
                       : 0.0;
@@ -335,6 +370,37 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   cmd_vel.linear.x  = applyDeadband(cmd_vel.linear.x,  linear_deadband_);
   cmd_vel.linear.y  = applyDeadband(cmd_vel.linear.y,  lateral_deadband_);
   cmd_vel.angular.z = applyDeadband(cmd_vel.angular.z, angular_deadband_);
+
+  // Emergency Stop Brake Check: If an obstacle is directly in front of the robot within collision safety margin
+  if (octree)
+  {
+    double check_dist = robot_radius_ + 0.15;
+    bool emergency_stop = false;
+    for (double fwd = 0.05; fwd <= check_dist; fwd += 0.08)
+    {
+      for (double lat = -robot_radius_ * 0.7; lat <= robot_radius_ * 0.7; lat += 0.08)
+      {
+        double mx = robot_pose.x + std::cos(robot_pose.yaw) * fwd - std::sin(robot_pose.yaw) * lat;
+        double my = robot_pose.y + std::sin(robot_pose.yaw) * fwd + std::cos(robot_pose.yaw) * lat;
+        double mz = robot_pose.z;
+
+        octomap::point3d check_p(static_cast<float>(mx), static_cast<float>(my), static_cast<float>(mz));
+        const octomap::OcTreeNode* node = octree->search(check_p);
+        if (node && octree->isNodeOccupied(node))
+        {
+          emergency_stop = true;
+          break;
+        }
+      }
+      if (emergency_stop) break;
+    }
+    if (emergency_stop)
+    {
+      ROS_WARN_THROTTLE(1.0, "OctoLocalPlanner: Emergency stop! Obstacle detected directly in front of robot.");
+      cmd_vel.linear.x = 0.0;
+      cmd_vel.linear.y = 0.0;
+    }
+  }
 
   last_cmd_vel_ = cmd_vel;
   publishTrackingPointMarker();
@@ -388,6 +454,19 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
     }
   }
 
+  // ALSO cache all preblocked cells within the bounding box as obstacles to repel the path!
+  const auto & preblocked = planner_.getPreblockedCells();
+  for (const auto & c : preblocked)
+  {
+    octomap::point3d p_world = planner_.gridToWorld(c);
+    if (p_world.x() >= min_pt.x() && p_world.x() <= max_pt.x() &&
+        p_world.y() >= min_pt.y() && p_world.y() <= max_pt.y() &&
+        p_world.z() >= min_pt.z() && p_world.z() <= max_pt.z())
+    {
+      local_obstacles.push_back(p_world);
+    }
+  }
+
   // 3. Perform Elastic Band Optimization                                                                                                                           
   // 预先计算并缓存每个路径点的地面吸附坐标，避免在 10 次迭代中重复进行百万次八叉树搜索                                                                                     
   std::vector<octomap::point3d> ground_snapped_positions(band.size());                                                                                                      
@@ -398,12 +477,31 @@ void OctoLocalPlanner::optimizeElasticBand(std::vector<geometry_msgs::PoseStampe
     octomap::point3d P_i(band[i].pose.position.x, band[i].pose.position.y, band[i].pose.position.z);                                                                        
     GridIndex cell_idx = planner_.worldToGrid(P_i.x(), P_i.y(), P_i.z());                                                                                                   
     GridIndex snapped;                                                                                                                                                      
-    // 局部规划限制最大吸附半径为 4 格 (40cm)，防止产生巨大的搜索立方体                                                                                                     
     int search_radius = std::min(4, snap_search_radius_cells_);                                                                                                             
                                                                                                                                                                             
-    if (planner_.findNearestFreeCell(cell_idx, robot_radius_, search_radius,                                                                                                
-                                     require_ground_support_, strict_direct_ground_support_,                                                                                
-                                     ground_support_xy_radius_cells_, ground_support_depth_cells_, snapped))                                                                
+    bool found_snap = false;
+    if (!planner_.getTraversableCells().empty())
+    {
+      found_snap = planner_.findNearestFreeCell(cell_idx, robot_radius_, search_radius,                                                                                                
+                                                require_ground_support_, strict_direct_ground_support_,                                                                                
+                                                ground_support_xy_radius_cells_, ground_support_depth_cells_, snapped);
+    }
+    else
+    {
+      // Fast 1D vertical raycast for ground snapping to prevent 900ms Octree search loops
+      for (int dz = 0; dz <= search_radius; ++dz)
+      {
+        GridIndex below{cell_idx.x, cell_idx.y, cell_idx.z - dz};
+        if (planner_.isOccupiedCell(below))
+        {
+          snapped = GridIndex{cell_idx.x, cell_idx.y, below.z + 1};
+          found_snap = true;
+          break;
+        }
+      }
+    }
+
+    if (found_snap)
     {                                                                                                                                                                       
       ground_snapped_positions[i] = planner_.gridToWorld(snapped);                                                                                                          
       ground_snapped_valid[i] = true;                                                                                                                                       
@@ -462,16 +560,25 @@ bool OctoLocalPlanner::getDistanceAndGradient(const octomap::point3d& p, const s
   if (obstacles.empty()) return false;
 
   double min_dist_sq = std::numeric_limits<double>::max();
+  double min_dist = std::numeric_limits<double>::max();
   octomap::point3d nearest_obs;
   bool found = false;
 
-  // Query cached obstacles in O(N) simple arithmetic vector checks
   for (const auto& obs : obstacles)
   {
-    double dist_sq = (p - obs).norm_sq();
+    // Bounding Box / Manhattan Pruning
+    double dx = p.x() - obs.x();
+    if (std::abs(dx) >= min_dist) continue;
+    double dy = p.y() - obs.y();
+    if (std::abs(dy) >= min_dist) continue;
+    double dz = p.z() - obs.z();
+    if (std::abs(dz) >= min_dist) continue;
+
+    double dist_sq = dx * dx + dy * dy + dz * dz;
     if (dist_sq < min_dist_sq)
     {
       min_dist_sq = dist_sq;
+      min_dist = std::sqrt(min_dist_sq);
       nearest_obs = obs;
       found = true;
     }
@@ -479,14 +586,15 @@ bool OctoLocalPlanner::getDistanceAndGradient(const octomap::point3d& p, const s
 
   if (found)
   {
-    distance = std::sqrt(min_dist_sq);
-    if (distance > 1e-4)
+    distance = min_dist;
+    octomap::point3d diff = p - nearest_obs;
+    if (distance > 1e-6)
     {
-      gradient = (p - nearest_obs) * (1.0 / distance);
+      gradient = diff * (1.0 / distance);
     }
     else
     {
-      gradient = octomap::point3d(0, 0, 1.0);
+      gradient = octomap::point3d(0, 0, 1);
     }
     return true;
   }
@@ -517,12 +625,22 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
   if (!lookupRobotPose2D(robot_pose)) {
     ROS_WARN("OctoLocalPlanner: Failed to get robot pose. Start tracking from path index 0."); return 0;
   }
-  int nearest = 0; double nearest_sq = std::numeric_limits<double>::max();
-  for (std::size_t i = 0; i < global_plan_.size(); ++i) {
+
+  int start_idx = 0;
+  int end_idx = static_cast<int>(global_plan_.size());
+
+  // Use local search window if target_index_ is valid and global plan hasn't changed size
+  if (target_index_ > 0 && target_index_ < end_idx) {
+    start_idx = std::max(0, target_index_ - 30);
+    end_idx = std::min(static_cast<int>(global_plan_.size()), target_index_ + 100);
+  }
+
+  int nearest = start_idx; double nearest_sq = std::numeric_limits<double>::max();
+  for (int i = start_idx; i < end_idx; ++i) {
     const auto & p = global_plan_[i].pose.position;
     const double dx = p.x - robot_pose.x, dy = p.y - robot_pose.y, dz = p.z - robot_pose.z;
     const double sq = dx*dx + dy*dy + dz*dz;
-    if (sq < nearest_sq) { nearest_sq = sq; nearest = static_cast<int>(i); }
+    if (sq < nearest_sq) { nearest_sq = sq; nearest = i; }
   }
   return nearest;
 }
@@ -756,12 +874,22 @@ void OctoLocalPlanner::renderTrackingDebugViewImpl()
     last_cmd_vel_.linear.x, last_cmd_vel_.linear.y, last_cmd_vel_.angular.z);
   cv::putText(image, cmd_text, {16, 82}, cv::FONT_HERSHEY_SIMPLEX, 0.50, cv::Scalar(120, 230, 255), 1, cv::LINE_AA);
 
-  try {
-    cv::imshow("octo_3d_local_planner_debug", image);
-    cv::waitKey(1);
-  } catch (const cv::Exception & ex) {
-    debug_view_disabled_ = true;
-    ROS_WARN("Disable OctoLocalPlanner OpenCV debug view: %s", ex.what());
+  // Construct and publish ROS Image message to allow RViz visualization
+  if (debug_image_pub_.getNumSubscribers() > 0)
+  {
+    sensor_msgs::Image img_msg;
+    img_msg.header.stamp = ros::Time::now();
+    img_msg.header.frame_id = map_frame_;
+    img_msg.height = image.rows;
+    img_msg.width = image.cols;
+    img_msg.encoding = "bgr8";
+    img_msg.is_bigendian = false;
+    img_msg.step = image.cols * 3;
+    size_t size = img_msg.step * img_msg.height;
+    img_msg.data.resize(size);
+    std::memcpy(&img_msg.data[0], image.data, size);
+    
+    debug_image_pub_.publish(img_msg);
   }
 }
 
@@ -796,6 +924,70 @@ bool OctoLocalPlanner::drawFinalGoalYaw(
   return true;
 }
 
+
+void OctoLocalPlanner::publishCellSetMarker(
+  const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
+  ros::Publisher & publisher,
+  const std::string & ns,
+  const std::string & frame_id,
+  float r_color, float g_color, float b_color, float a_color) const
+{
+  auto octree = planner_.getOctree();
+  if (!octree) return;
+  visualization_msgs::Marker marker;
+  marker.header.stamp = ros::Time::now();
+  marker.header.frame_id = frame_id;
+  marker.ns = ns;
+  marker.id = 0;
+  marker.type = visualization_msgs::Marker::CUBE_LIST;
+  marker.action = visualization_msgs::Marker::ADD;
+  marker.pose.orientation.w = 1.0;
+  const double resolution = octree->getResolution();
+  marker.scale.x = resolution;
+  marker.scale.y = resolution;
+  marker.scale.z = resolution;
+  marker.color.r = r_color;
+  marker.color.g = g_color;
+  marker.color.b = b_color;
+  marker.color.a = a_color;
+  marker.points.reserve(cells.size());
+  for (const auto & c : cells) {
+    const auto p = planner_.gridToWorld(c);
+    geometry_msgs::Point q;
+    q.x = p.x(); q.y = p.y(); q.z = p.z();
+    marker.points.push_back(q);
+  }
+  publisher.publish(marker);
+}
+
+void OctoLocalPlanner::publishRiskCostCloud(const std::string & frame_id) const
+{
+  const auto costmap = planner_.getPreblockedCostmap();
+  sensor_msgs::PointCloud2 cloud_msg;
+  cloud_msg.header.stamp = ros::Time::now();
+  cloud_msg.header.frame_id = frame_id;
+
+  sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+  modifier.setPointCloud2Fields(4,
+    "x", 1, sensor_msgs::PointField::FLOAT32,
+    "y", 1, sensor_msgs::PointField::FLOAT32,
+    "z", 1, sensor_msgs::PointField::FLOAT32,
+    "intensity", 1, sensor_msgs::PointField::FLOAT32);
+  modifier.resize(costmap.size());
+
+  sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+  sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+  sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+  sensor_msgs::PointCloud2Iterator<float> iter_i(cloud_msg, "intensity");
+
+  for (const auto & entry : costmap) {
+    const auto p = planner_.gridToWorld(entry.first);
+    *iter_x = p.x(); *iter_y = p.y(); *iter_z = p.z();
+    *iter_i = static_cast<float>(entry.second);
+    ++iter_x; ++iter_y; ++iter_z; ++iter_i;
+  }
+  risk_cost_pub_.publish(cloud_msg);
+}
 
 void OctoLocalPlanner::publishStatus(const std::string& status)
 {

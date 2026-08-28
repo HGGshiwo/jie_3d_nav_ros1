@@ -7,7 +7,8 @@
     <!-- 1. Path to a pre-built static global octomap file (.ot or .bt). 
          If left empty, the node will convert the 2D grid map (/map) into a 3D global octomap. -->
     <arg name="global_octomap_path" default=""/>
-    <arg name="global_octomap_topic" default="/octomap_global"/>
+    <arg name="global_octomap_topic" default=""/>
+    <arg name="map_topic" default=""/>
     
     <!-- 2. Real-time point cloud topic for local dynamic obstacle avoidance (e.g. /camera/depth/points or /velodyne_points) -->
     <arg name="point_cloud_topic" default="camera/depth/points"/>
@@ -20,9 +21,13 @@
         <rosparam file="$(find jie_octomap)/config/move_base/move_base_params.yaml" command="load" />
         
         <param name="base_global_planner" value="octo_planner/OctoGlobalPlanner"/>
-        <param name="base_local_planner" value="octo_planner/OctoLocalPlanner"/>
+        <!-- <param name="base_local_planner" value="octo_planner/OctoLocalPlanner"/> -->
+        <param name="base_local_planner" value="octo_planner/D1LocalPlanner"/>
+         
         
         <!-- Pass topics dynamically from arguments -->
+        <param name="OctoGlobalPlanner/local_map_path" value="$(arg global_octomap_path)"/>
+        <param name="OctoGlobalPlanner/map_topic" value="$(arg map_topic)"/>
         <param name="OctoGlobalPlanner/octomap_topic" value="$(arg global_octomap_topic)"/>
         <param name="OctoLocalPlanner/octomap_topic" value="/octomap_local"/>
 
@@ -46,14 +51,15 @@
                 snap_search_radius_cells: 8
 
                 # 3D Elastic Band parameters
-                eb_iterations: 10
+                eb_iterations: 25
                 eb_w_smooth: 0.3
-                eb_w_obstacle: 0.5
+                eb_w_obstacle: 0.6
                 eb_w_ground: 0.4
-                eb_safe_distance: 0.30
+                eb_safe_distance: 0.55
                 eb_learning_rate: 0.1
 
                 # Path tracking geometry
+                lookahead_distance: 1.00
                 robot_center_offset_frame: odin1_base_link
                 robot_center_offset_x: -0.18
                 robot_center_offset_y: 0.0
@@ -62,15 +68,15 @@
                 tracking_point_marker_scale: 0.28
 
                 # OpenCV top-down debug view
-                enable_tracking_debug_view: false
+                enable_tracking_debug_view: true
                 tracking_debug_view_size_px: 640
                 tracking_debug_view_pixels_per_meter: 80.0
                 tracking_debug_view_frequency: 10.0
 
                 # Speed tracking gains
-                linear_gain: 1.0
+                linear_gain: 1.5
                 lateral_gain: 0.8
-                heading_gain: 0.8
+                heading_gain: 1.2
                 cross_track_angular_gain: 0.5
                 final_yaw_gain: 0.3
 
@@ -82,9 +88,9 @@
 
                 # Deadbands and goal tolerances
                 align_final_yaw: true
-                linear_deadband: 0.05
-                lateral_deadband: 0.05
-                angular_deadband: 0.05
+                linear_deadband: 0.01
+                lateral_deadband: 0.01
+                angular_deadband: 0.01
                 goal_position_tolerance: 0.1
                 goal_yaw_tolerance: 0.2
         </rosparam>               
@@ -93,11 +99,11 @@
         <param name="global_costmap/global_frame"                   value="$(arg frame_prefix)map"/>
         <param name="global_costmap/robot_base_frame"               value="$(arg frame_prefix)base_footprint"/>
         <param name="global_costmap/2d_obstacles_layer/scan/topic"  value="$(arg robot_name)scan"/>
-        <param name="global_costmap/3d_obstacles_layer/depth/topic" value="$(arg robot_name)camera/depth/points"/>
+        <param name="global_costmap/3d_obstacles_layer/depth/topic" value="$(arg point_cloud_topic)"/>
         <param name="local_costmap/global_frame"                    value="$(arg frame_prefix)odom"/>
         <param name="local_costmap/robot_base_frame"                value="$(arg frame_prefix)base_footprint"/>
         <param name="local_costmap/2d_obstacles_layer/scan/topic"   value="$(arg robot_name)scan"/>
-        <param name="local_costmap/3d_obstacles_layer/depth/topic"  value="$(arg robot_name)camera/depth/points"/>
+        <param name="local_costmap/3d_obstacles_layer/depth/topic"  value="$(arg point_cloud_topic)"/>
     </node>
     <!-- Case A: Load pre-built global static octomap package if path is specified -->
     <node unless="$(eval arg('global_octomap_path') == '')" pkg="jie_octomap" type="map_package_manager.py" name="global_map_package_manager" output="screen">
@@ -108,7 +114,7 @@
 
     <!-- Case B: Convert 2D map to 3D global octomap if no static file is specified -->
     <node if="$(eval arg('global_octomap_path') == '')" pkg="jie_octomap" type="occupancy_grid_to_octomap_node" name="occupancy_grid_to_octomap" output="screen">                             
-        <param name="grid_topic" value="/map" />                                                                                             
+        <param name="grid_topic" value="$(arg map_topic)" />                                                                                             
         <param name="octomap_topic" value="/octomap_global" />                                                                                                                                                                                       
         <param name="frame_id" value="map" />                                                                                                                                                                                                                                          
         <param name="octomap_resolution" value="0.2" />                                                                                                                                                                                                     

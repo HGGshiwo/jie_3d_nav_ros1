@@ -62,6 +62,13 @@ private:
   void publishTrackingPointMarker();
   void publishLocalBandMarkers(const std::vector<geometry_msgs::PoseStamped>& band);
   void clearMarkers();
+  void publishCellSetMarker(
+    const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
+    ros::Publisher & publisher,
+    const std::string & ns,
+    const std::string & frame_id,
+    float r_color, float g_color, float b_color, float a_color) const;
+  void publishRiskCostCloud(const std::string & frame_id) const;
   void renderTrackingDebugView(const ros::TimerEvent &);
   void renderTrackingDebugViewImpl();
   
@@ -84,6 +91,8 @@ private:
   costmap_2d::Costmap2DROS* costmap_ros_;
   bool initialized_;
   bool map_ready_;
+  bool map_changed_;
+  ros::Time last_local_rebuild_time_;
 
   // ROS communications & timers
   ros::NodeHandle nh_;
@@ -91,6 +100,10 @@ private:
   ros::Publisher marker_pub_;
   ros::Publisher band_marker_pub_;
   ros::Publisher status_pub_;
+  ros::Publisher debug_image_pub_;
+  ros::Publisher traversable_marker_pub_;
+  ros::Publisher preblocked_marker_pub_;
+  ros::Publisher risk_cost_pub_;
   ros::Timer debug_view_timer_;
 
   // OctoPlannerCore instance for local traversability & ground checks
