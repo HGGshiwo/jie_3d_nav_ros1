@@ -372,6 +372,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   cmd_vel.angular.z = applyDeadband(cmd_vel.angular.z, angular_deadband_);
 
   // Emergency Stop Brake Check: If an obstacle is directly in front of the robot within collision safety margin
+  auto octree = planner_.getOctree();
   if (octree)
   {
     double check_dist = robot_radius_ + 0.15;
