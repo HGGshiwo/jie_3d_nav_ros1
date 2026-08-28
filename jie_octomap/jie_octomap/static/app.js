@@ -61,6 +61,12 @@ document.getElementById('show-traversable').addEventListener('change', (e) => {
 document.getElementById('show-risk-cost').addEventListener('change', (e) => {
     layers.risk_cost.mesh.visible = e.target.checked;
 });
+const showRobotEl = document.getElementById('show-robot');
+if (showRobotEl) {
+    showRobotEl.addEventListener('change', (e) => {
+        if (dogMeshGroup) dogMeshGroup.visible = e.target.checked;
+    });
+}
 
 // ---- 3. 编辑交互逻辑 ----
 const raycaster = new THREE.Raycaster();
@@ -439,6 +445,63 @@ async function setGoalPoint(x, y, z) {
         statusEl.innerText = `设置终点失败: ${err.message}`;
     }
 }
+
+// 机器狗 3D 可视化模型与轮询更新
+let dogMeshGroup = null;
+
+function updateRobotVisual(position, orientation) {
+    if (!dogMeshGroup) {
+        dogMeshGroup = new THREE.Group();
+
+        // 狗主体 (科技蓝长方体)
+        const bodyGeo = new THREE.BoxGeometry(0.5, 0.35, 0.25);
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, metalness: 0.3, roughness: 0.4 });
+        const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+        bodyMesh.position.z = 0.125;
+        dogMeshGroup.add(bodyMesh);
+
+        // 狗头/朝向指示器 (指向 +X 轴的红色圆锥)
+        const headGeo = new THREE.ConeGeometry(0.18, 0.4, 16);
+        headGeo.rotateZ(-Math.PI / 2); // 让顶点指向 +X 轴
+        const headMat = new THREE.MeshStandardMaterial({ color: 0xef4444, metalness: 0.2, roughness: 0.3 });
+        const headMesh = new THREE.Mesh(headGeo, headMat);
+        headMesh.position.set(0.35, 0, 0.15);
+        dogMeshGroup.add(headMesh);
+
+        // 底部定位光圈
+        const ringGeo = new THREE.RingGeometry(0.3, 0.42, 32);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x60a5fa, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+        const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+        ringMesh.position.z = 0.01;
+        dogMeshGroup.add(ringMesh);
+
+        const showRobotEl = document.getElementById('show-robot');
+        if (showRobotEl) {
+            dogMeshGroup.visible = showRobotEl.checked;
+        }
+        scene.add(dogMeshGroup);
+    }
+
+    dogMeshGroup.position.set(position.x, position.y, position.z);
+    if (orientation) {
+        dogMeshGroup.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+    }
+}
+
+// 轮询获取机器狗实时定位信息（每 200ms 高频更新）
+setInterval(async () => {
+    try {
+        const res = await fetch('/api/get_robot_pose');
+        if (res.ok) {
+            const data = await res.json();
+            if (data.has_pose && data.position) {
+                updateRobotVisual(data.position, data.orientation);
+            }
+        }
+    } catch (err) {
+        // 忽略网络抖动
+    }
+}, 200);
 
 // 轮询获取规划路径
 setInterval(async () => {

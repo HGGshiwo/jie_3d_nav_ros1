@@ -619,6 +619,48 @@ async def set_goal(req: PointRequest):
 async def get_path():
     return {"path": latest_planned_path}
 
+@app.get("/api/get_robot_pose")
+async def get_robot_pose():
+    global latest_odom_pose, tf_buffer
+    if latest_odom_pose is not None:
+        return {
+            "has_pose": True,
+            "position": {
+                "x": latest_odom_pose.position.x,
+                "y": latest_odom_pose.position.y,
+                "z": latest_odom_pose.position.z
+            },
+            "orientation": {
+                "x": latest_odom_pose.orientation.x,
+                "y": latest_odom_pose.orientation.y,
+                "z": latest_odom_pose.orientation.z,
+                "w": latest_odom_pose.orientation.w
+            }
+        }
+    elif tf_buffer is not None:
+        try:
+            parent_frame = rospy.get_param("~tf_parent_frame", "map")
+            candidate_children = [rospy.get_param("~tf_child_frame", "base_footprint"), "odin1_base_link", "base_link"]
+            trans = None
+            for child in candidate_children:
+                try:
+                    trans = tf_buffer.lookup_transform(parent_frame, child, rospy.Time(0), rospy.Duration(0.05))
+                    break
+                except Exception:
+                    continue
+            if trans is not None:
+                t = trans.transform.translation
+                r = trans.transform.rotation
+                return {
+                    "has_pose": True,
+                    "position": {"x": t.x, "y": t.y, "z": t.z},
+                    "orientation": {"x": r.x, "y": r.y, "z": r.z, "w": r.w}
+                }
+        except Exception:
+            pass
+    return {"has_pose": False}
+
+
 @app.post("/api/debug_cell")
 async def debug_cell(req: PointRequest):
     service_name = "/jie_path_node/query_cell_debug_info"
