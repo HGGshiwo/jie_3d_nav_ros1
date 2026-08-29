@@ -17,6 +17,8 @@ const editZInput = document.getElementById('edit-z');
 const editLayerSelect = document.getElementById('edit-layer');
 const debugPanelDiv = document.getElementById('debug-panel');
 const btnCopyDebug = document.getElementById('btn-copy-debug');
+const btnFocusRobot = document.getElementById('btn-focus-robot');
+const rosStatusEl = document.getElementById('ros-status');
 
 // 全局参数缓存
 let currentTool = 'view';
@@ -503,7 +505,75 @@ setInterval(async () => {
     }
 }, 200);
 
-// 轮询获取规划路径
+// 显示与隐藏全局悬浮加载提示框
+function showLoading(msg = "⏳ 正在加载地图数据，请稍候...") {
+    const indicator = document.getElementById('loading-indicator');
+    const msgEl = document.getElementById('loading-msg');
+    if (indicator && msgEl) {
+        msgEl.innerText = msg;
+        indicator.style.display = 'block';
+        indicator.style.opacity = '1';
+    }
+}
+
+function hideLoading() {
+    const indicator = document.getElementById('loading-indicator');
+    if (indicator) {
+        indicator.style.opacity = '0';
+        setTimeout(() => { indicator.style.display = 'none'; }, 300);
+    }
+}
+
+// 视角一键对准机器狗位置（第一人称/追随视角）
+function focusOnRobot() {
+    if (!dogMeshGroup || !dogMeshGroup.position) {
+        if (statusEl) statusEl.innerText = '无法对准视角: 未收到机器狗当前定位';
+        return;
+    }
+
+    const pos = dogMeshGroup.position.clone();
+    const quat = dogMeshGroup.quaternion.clone();
+
+    // 根据四元数计算机器狗前向 (+X 轴) 与上向 (+Z 轴) 向量
+    const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(quat);
+    const up = new THREE.Vector3(0, 0, 1);
+
+    // 将相机位置设定在机器狗后方 2.0m、上方 1.2m 处（类似于第一人称/第三人称追随视角）
+    const camPos = pos.clone()
+        .sub(forward.clone().multiplyScalar(2.0))
+        .add(up.clone().multiplyScalar(1.2));
+
+    // 将控制焦点（Look-At 点）设定在机器狗前方 2.5m 处
+    const targetPos = pos.clone().add(forward.clone().multiplyScalar(2.5)).addScaledVector(up, 0.3);
+
+    // 赋值相机与 OrbitControls
+    camera.position.copy(camPos);
+    controls.target.copy(targetPos);
+    controls.update();
+
+    if (statusEl) statusEl.innerText = `已切换至第一人称追随视角: [${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}]`;
+}
+
+if (btnFocusRobot) {
+    btnFocusRobot.addEventListener('click', focusOnRobot);
+}
+
+// 轮询获取 ROS 规划状态消息 (500ms 刷新)
+setInterval(async () => {
+    try {
+        const res = await fetch('/api/get_status_text');
+        if (res.ok) {
+            const data = await res.json();
+            if (data.status_text && rosStatusEl) {
+                rosStatusEl.innerText = `ROS 状态: ${data.status_text}`;
+            }
+        }
+    } catch (err) {
+        // 忽略网络抖动
+    }
+}, 500);
+
+// 轮询获取 ROS 规划路径数据 (500ms 刷新)
 setInterval(async () => {
     try {
         const res = await fetch('/api/get_path');
@@ -514,9 +584,9 @@ setInterval(async () => {
             }
         }
     } catch (err) {
-        // 忽略网络错误，避免刷屏
+        // 忽略网络抖动
     }
-}, 1000);
+}, 500);
 
 // 页面加载时自动获取先前缓存的地图配置或默认配置并加载，避免手动重新输入
 async function initDefaultMap() {
@@ -542,9 +612,15 @@ async function initDefaultMap() {
         }
     }
     
-    // 静默拉取当前 ROS 中活跃的地图数据（而不是触发重新读取磁盘包服务）
-    console.log("【网页初始化】静默拉取当前 ROS 活跃的地图数据...");
+    // 拉取当前 ROS 中活跃的地图数据
+    console.log("【网页初始化】拉取当前 ROS 活跃的地图数据...");
+    showLoading("⏳ 正在初始化载入 3D 地图...");
     await reloadMapFromServer(true);
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            hideLoading();
+        });
+    });
 }
 initDefaultMap();
 
@@ -773,7 +849,10 @@ async function initMapVersions() {
 }
 
 async function reloadMapFromServer(silent = false) {
-    if (!silent) statusEl.innerText = "正在加载...";
+    if (!silent) {
+        statusEl.innerText = "正在加载...";
+        showLoading("⏳ 正在载入地图数据并等待 C++ 预构建...");
+    }
     
     // 如果是静默被动拉取，我们只查询当前缓存的地图（不触发底层磁盘重新加载服务）
     // 如果是主动加载，我们调用 load_map 触发底层地图包的完整载入服务
@@ -855,7 +934,16 @@ async function reloadMapFromServer(silent = false) {
         return true;
     } catch (err) {
         if (!silent) statusEl.innerText = `加载失败: ${err.message}`;
+        if (!silent) hideLoading();
         return false;
+    } finally {
+        if (!silent) {
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    hideLoading();
+                });
+            });
+        }
     }
 }
 
@@ -869,7 +957,10 @@ async function sendMapData(endpoint) {
     btnSync.disabled = true;
     btnSave.disabled = true;
     btnLoad.disabled = true;
-    statusEl.innerText = endpoint.includes('sync_ros') ? "正在同步地图至 ROS 并等待 C++ 结算，请稍候..." : "正在保存地图，请稍候...";
+    const isSync = endpoint.includes('sync_ros');
+    const loadingText = isSync ? "⏳ 正在同步地图至 ROS 并等待 C++ 结算，请稍候..." : "⏳ 正在保存地图文件，请稍候...";
+    statusEl.innerText = isSync ? "正在同步地图至 ROS 并等待 C++ 结算，请稍候..." : "正在保存地图，请稍候...";
+    showLoading(loadingText);
     
     const layersData = {
         occupied: { points: layers.occupied.getArray(), scale: layers.occupied.scale }
@@ -906,6 +997,7 @@ async function sendMapData(endpoint) {
         btnSync.disabled = false;
         btnSave.disabled = false;
         btnLoad.disabled = false;
+        hideLoading();
     }
 }
 

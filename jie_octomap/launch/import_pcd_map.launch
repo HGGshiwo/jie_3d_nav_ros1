@@ -13,6 +13,7 @@
 
     <!-- planner_node (jie_path_node) -->
     <node pkg="octo_planner" type="jie_path_node" name="jie_path_node" output="screen">
+        <rosparam file="$(find octo_planner)/config/planner_params.yaml" command="load" />
         <param name="octomap_topic" value="/octomap"/>
         <param name="start_topic" value="/start_point"/>
         <param name="goal_topic" value="/goal_point"/>
@@ -24,19 +25,6 @@
         <param name="frame_id" value="map"/>
         <param name="map_id" value="imported_pcd_map"/>
         <param name="source_world_file" value=""/>
-        <param name="robot_radius" value="0.25"/>
-        <param name="max_iterations" value="30000"/>
-        <param name="snap_search_radius_cells" value="12"/>
-        <param name="require_ground_support" value="true"/>
-        <param name="strict_direct_ground_support" value="false"/>
-        <param name="ground_support_xy_radius_cells" value="1"/>
-        <param name="ground_support_depth_cells" value="3"/>
-        <param name="enable_preblocked_costmap" value="true"/>
-        <param name="preblocked_costmap_radius_cells" value="3"/>
-        <param name="preblocked_costmap_weight" value="2.5"/>
-        <param name="lowest_traversable_only" value="false"/>
-        <param name="max_step_height_cells" value="3"/>
-        <param name="robot_clearance_height_cells" value="3"/>
     </node>
 
     <!-- occupied_marker_node -->

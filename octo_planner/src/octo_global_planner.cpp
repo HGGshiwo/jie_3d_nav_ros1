@@ -43,9 +43,10 @@ public:
 
     ros::NodeHandle private_nh("~/" + name);
     
-    private_nh.param<std::string>("local_map_path", local_map_path_, "");
-    private_nh.param<std::string>("map_topic", map_topic_, "");
-    private_nh.param<std::string>("octomap_topic", octomap_topic_, "/octomap");
+    private_nh.param<std::string>("octomap_topic", octomap_topic_, "/octomap_global");
+    if (octomap_topic_.empty()) {
+      octomap_topic_ = "/octomap_global";
+    }
     
     double robot_radius;
     int max_iterations, snap_search_radius_cells;
@@ -71,11 +72,6 @@ public:
     private_nh.param<double>("preblocked_costmap_weight", preblocked_costmap_weight, 1.5);
     private_nh.param<bool>("lowest_traversable_only", lowest_traversable_only, false);
 
-    private_nh.param<double>("octomap_resolution", octomap_resolution_, 0.2);
-    private_nh.param<double>("wall_height_m", wall_height_m_, 1.0);
-    private_nh.param<double>("floor_z_m", floor_z_m_, 0.0);
-    private_nh.param<int>("occupied_threshold", occupied_threshold_, 50);
-
     planner_.setRobotRadius(robot_radius);
     planner_.setMaxIterations(max_iterations);
     planner_.setSnapSearchRadiusCells(snap_search_radius_cells);
@@ -91,58 +87,10 @@ public:
     planner_.setPreblockedCostmapWeight(preblocked_costmap_weight);
     planner_.setLowestTraversableOnly(lowest_traversable_only);
 
-    // Map initialization with Priority Check & Fallback
-    bool source_found = false;
-
-    // Priority 1: Local Map File
-    if (!local_map_path_.empty()) {
-      ROS_INFO("OctoGlobalPlanner: Attempting to load local map file: %s", local_map_path_.c_str());
-      std::shared_ptr<octomap::OcTree> octree;
-      if (local_map_path_.length() > 3 && local_map_path_.substr(local_map_path_.length() - 3) == ".bt") {
-        octree = std::make_shared<octomap::OcTree>(octomap_resolution_);
-        if (octree->readBinary(local_map_path_)) {
-          source_found = true;
-        }
-      } else {
-        octomap::AbstractOcTree* abstract_tree = octomap::AbstractOcTree::read(local_map_path_);
-        if (abstract_tree) {
-          octree = std::shared_ptr<octomap::OcTree>(dynamic_cast<octomap::OcTree*>(abstract_tree));
-          if (octree) {
-            source_found = true;
-          } else {
-            delete abstract_tree;
-          }
-        }
-      }
-
-      if (source_found) {
-        planner_.setOctree(octree);
-        planner_.rebuildAllLayers();
-        map_ready_ = true;
-        ROS_INFO("OctoGlobalPlanner: Active map source in use: Local Map File [%s]", local_map_path_.c_str());
-      } else {
-        ROS_ERROR("OctoGlobalPlanner: Failed to load local map file '%s'. Downgrading to next priority...", local_map_path_.c_str());
-      }
-    }
-
-    // Priority 2: Map Topic (OccupancyGrid)
+    // Subscribe to standard octomap topic
     ros::NodeHandle nh;
-    if (!source_found && !map_topic_.empty()) {
-      map_sub_ = nh.subscribe(map_topic_, 1, &OctoGlobalPlanner::onOccupancyGrid, this);
-      ROS_INFO("OctoGlobalPlanner: Map source configured: Map Topic [%s]", map_topic_.c_str());
-      source_found = true;
-    }
-
-    // Priority 3: Octomap Topic (Octomap)
-    if (!source_found && !octomap_topic_.empty()) {
-      octomap_sub_ = nh.subscribe(octomap_topic_, 1, &OctoGlobalPlanner::onOctomap, this);
-      ROS_INFO("OctoGlobalPlanner: Map source configured: Octomap Topic [%s]", octomap_topic_.c_str());
-      source_found = true;
-    }
-
-    if (!source_found) {
-      ROS_ERROR("OctoGlobalPlanner: No map source configured! Please set local_map_path, map_topic, or octomap_topic.");
-    }
+    octomap_sub_ = nh.subscribe(octomap_topic_, 1, &OctoGlobalPlanner::onOctomap, this);
+    ROS_INFO("OctoGlobalPlanner: Pure topic mode active. Listening to OctoMap Topic [%s]", octomap_topic_.c_str());
 
     // Advertise the full global plan topic globally under move_base namespace (~plan resolves to /move_base/plan)
     ros::NodeHandle move_base_nh("~");
@@ -155,11 +103,7 @@ public:
     status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
 
     initialized_ = true;
-    if (map_ready_) {
-      ROS_INFO("OctoGlobalPlanner initialized successfully with pre-loaded map.");
-    } else {
-      ROS_INFO("OctoGlobalPlanner initialized successfully. Waiting for map message...");
-    }
+    ROS_INFO("OctoGlobalPlanner initialized successfully. Waiting for map message on %s...", octomap_topic_.c_str());
   }
 
   virtual bool makePlan(const geometry_msgs::PoseStamped& start,
@@ -216,10 +160,15 @@ public:
       return true;
     }
 
+    ros::Time t_start = ros::Time::now();
+    double rebuild_ms = 0.0;
+
     if (map_changed_)
     {
       ROS_INFO("OctoGlobalPlanner: Map updated. Rebuilding layers before planning...");
+      ros::Time t_reb = ros::Time::now();
       planner_.rebuildAllLayers();
+      rebuild_ms = (ros::Time::now() - t_reb).toSec() * 1000.0;
       map_changed_ = false;
 
       // Publish A* planner internal cost/traversability representation to RViz
@@ -230,11 +179,19 @@ public:
 
     std::vector<GridIndex> cells;
     std::string error_msg;
+    ros::Time t_search = ros::Time::now();
     bool ok = planner_.plan(start.pose.position, goal.pose.position, cells, error_msg);
+    double search_ms = (ros::Time::now() - t_search).toSec() * 1000.0;
+    double total_ms = (ros::Time::now() - t_start).toSec() * 1000.0;
+
+    char status_buf[512];
     if (!ok)
     {
-      ROS_WARN_THROTTLE(2.0, "OctoGlobalPlanner failed to find a plan: %s", error_msg.c_str());
-      publishStatus("Global planner failed: " + error_msg);
+      snprintf(status_buf, sizeof(status_buf),
+               "[GlobalPlanner FAIL] Rebuild: %.1fms | Search: %.1fms | Total: %.1fms | Err: %s",
+               rebuild_ms, search_ms, total_ms, error_msg.c_str());
+      publishStatus(status_buf);
+      ROS_WARN_THROTTLE(1.0, "%s", status_buf);
       return false;
     }
 
@@ -273,8 +230,11 @@ public:
     path_msg.poses = plan;
     plan_pub_.publish(path_msg);
 
-    publishStatus("Global planner: Path found successfully.");
-    ROS_INFO_THROTTLE(1.0, "OctoGlobalPlanner: Path found with %zu points. Published to /move_base/plan", plan.size());
+    snprintf(status_buf, sizeof(status_buf),
+             "[GlobalPlanner OK] Rebuild: %.1fms | Search: %.1fms | Total: %.1fms | Pts: %zu",
+             rebuild_ms, search_ms, total_ms, plan.size());
+    publishStatus(status_buf);
+    ROS_INFO_THROTTLE(1.0, "%s", status_buf);
     return true;
   }
 
@@ -311,7 +271,31 @@ public:
     }
     planner_.setOctree(octree);
     map_ready_ = true;
-    map_changed_ = true;
+
+    // 收到地图后立刻预构建所有 3D 图层并推送到 ROS 话题与网页状态栏
+    char status_start_buf[256];
+    snprintf(status_start_buf, sizeof(status_start_buf),
+             "[GlobalPlanner STATUS] Map received. Pre-building 3D layers...");
+    publishStatus(status_start_buf);
+    ROS_INFO("%s", status_start_buf);
+
+    ros::Time t_reb = ros::Time::now();
+    planner_.rebuildAllLayers();
+    double reb_ms = (ros::Time::now() - t_reb).toSec() * 1000.0;
+    map_changed_ = false;
+
+    // 主动向 Web 界面及 RViz 推送真实图层 Marker
+    std::string frame_id = msg->header.frame_id.empty() ? "map" : msg->header.frame_id;
+    publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", frame_id, 0.20F, 0.95F, 0.55F, 0.55F);
+    publishCellSetMarker(planner_.getPreblockedCells(), preblocked_marker_pub_, "preblocked_cells", frame_id, 0.15F, 0.35F, 1.0F, 0.95F);
+    publishRiskCostCloud(frame_id);
+
+    char status_done_buf[256];
+    snprintf(status_done_buf, sizeof(status_done_buf),
+             "[GlobalPlanner READY] Pre-build finished in %.1fms | Trav: %zu | Preblocked: %zu",
+             reb_ms, planner_.getTraversableCells().size(), planner_.getPreblockedCells().size());
+    publishStatus(status_done_buf);
+    ROS_INFO("%s", status_done_buf);
   }
 
   void onOccupancyGrid(const nav_msgs::OccupancyGrid::ConstPtr & msg)
@@ -467,13 +451,10 @@ public:
 
   void publishStatus(const std::string& status)
   {
-    if (status != last_status_)
-    {
-      last_status_ = status;
-      std_msgs::String msg;
-      msg.data = status;
-      status_pub_.publish(msg);
-    }
+    last_status_ = status;
+    std_msgs::String msg;
+    msg.data = status;
+    status_pub_.publish(msg);
   }
 
   bool initialized_;

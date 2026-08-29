@@ -15,12 +15,13 @@ from concurrent.futures import ThreadPoolExecutor
 import rospy
 import tf2_ros
 from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point, PointStamped, PoseStamped
+from geometry_msgs.msg import Point, PointStamped, PoseStamped, TransformStamped
 from nav_msgs.msg import Path as ROSPath, Odometry
 from move_base_msgs.msg import MoveBaseActionGoal
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs.point_cloud2 as pc2
 import time
+from std_msgs.msg import String
 from jie_map_msgs.srv import LoadNavigationMapPackage, LoadNavigationMapPackageRequest, SaveNavigationMapPackage, SaveNavigationMapPackageRequest, QueryCellDebugInfo, QueryCellDebugInfoRequest
 
 from fastapi.middleware.gzip import GZipMiddleware
@@ -63,6 +64,13 @@ latest_planned_path = []
 
 # 全局存储最新里程计位姿
 latest_odom_pose = None
+
+# 全局存储最新 move_base status_text
+latest_status_text = "就绪"
+
+def status_text_callback(msg):
+    global latest_status_text
+    latest_status_text = msg.data
 
 # 地图更新版本控制（增量版本号，用于前端轻量级轮询同步）
 preblocked_version = 0
@@ -129,16 +137,51 @@ def risk_cost_callback(msg):
     except Exception as e:
         print(f"[risk_cost_callback] Error parsing PointCloud2: {e}")
 
-# TF 监听全局变量
+# TF 监听与广播全局变量
 tf_buffer = None
 tf_listener = None
+tf_broadcaster = None
+publish_fake_tf = False
+fake_robot_pose = None  # 存储模拟机器人的最新坐标
+
+def publish_fake_tf_loop(event):
+    global fake_robot_pose, tf_broadcaster, publish_fake_tf
+    if not publish_fake_tf or tf_broadcaster is None or fake_robot_pose is None:
+        return
+    try:
+        now_stamp = rospy.Time.now()
+        child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
+        
+        # 1. 持续高频广播 map -> odom
+        t_map_odom = TransformStamped()
+        t_map_odom.header.stamp = now_stamp
+        t_map_odom.header.frame_id = "map"
+        t_map_odom.child_frame_id = "odom"
+        t_map_odom.transform.translation.x = 0.0
+        t_map_odom.transform.translation.y = 0.0
+        t_map_odom.transform.translation.z = 0.0
+        t_map_odom.transform.rotation.w = 1.0
+        
+        # 2. 持续高频广播 odom -> base_footprint
+        t_odom_base = TransformStamped()
+        t_odom_base.header.stamp = now_stamp
+        t_odom_base.header.frame_id = "odom"
+        t_odom_base.child_frame_id = child_frame
+        t_odom_base.transform.translation.x = fake_robot_pose["x"]
+        t_odom_base.transform.translation.y = fake_robot_pose["y"]
+        t_odom_base.transform.translation.z = fake_robot_pose["z"]
+        t_odom_base.transform.rotation.w = 1.0
+        
+        tf_broadcaster.sendTransform([t_map_odom, t_odom_base])
+    except Exception as e:
+        pass
 
 # 全局 ROS 发布者
 ros_pubs = {}
 
 @app.on_event("startup")
 def startup_event():
-    global tf_buffer, tf_listener
+    global tf_buffer, tf_listener, tf_broadcaster, publish_fake_tf, fake_robot_pose
     try:
         rospy.init_node("web_map_manager", disable_signals=True)
         ros_pubs["occupied"] = rospy.Publisher("/edited_occupied_markers", Marker, queue_size=1, latch=True)
@@ -151,17 +194,26 @@ def startup_event():
         ros_pubs["move_base_simple_goal"] = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=1, latch=True)
         ros_pubs["move_base_action_goal"] = rospy.Publisher("/move_base/goal", MoveBaseActionGoal, queue_size=1, latch=True)
         
-        # 获取话题名称参数
+        # 获取话题名称与伪 TF 参数
         occupied_topic = rospy.get_param("~occupied_marker_topic", "/octomap_occupied_markers")
-        preblocked_topic = rospy.get_param("~preblocked_marker_topic", "/preblocked_cells_markers")
-        traversable_topic = rospy.get_param("~traversable_marker_topic", "/traversable_cells_markers")
-        risk_cost_topic = rospy.get_param("~risk_cost_topic", "/risk_cost_cells")
-        path_topic = rospy.get_param("~path_topic", "/planned_path")
+        preblocked_topic = rospy.get_param("~preblocked_marker_topic", "/move_base/preblocked_cells")
+        traversable_topic = rospy.get_param("~traversable_marker_topic", "/move_base/traversable_cells")
+        risk_cost_topic = rospy.get_param("~risk_cost_topic", "/move_base/risk_cost_cloud")
+        path_topic = rospy.get_param("~path_topic", "/move_base/plan")
         odom_topic = rospy.get_param("~odom_topic", "/loc_base")
+        status_text_topic = rospy.get_param("~status_text_topic", "/move_base/status_text")
+        publish_fake_tf = rospy.get_param("~publish_fake_tf", False)
         
-        # 初始化 TF2 监听器
+        # 初始化 TF2 监听器与广播器
         tf_buffer = tf2_ros.Buffer()
         tf_listener = tf2_ros.TransformListener(tf_buffer)
+        tf_broadcaster = tf2_ros.TransformBroadcaster()
+        
+        # 启动 20Hz (0.05s) 伪 TF 定时高频广播器，避免 Costmap transform timeout 报错
+        if publish_fake_tf:
+            if fake_robot_pose is None:
+                fake_robot_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
+            rospy.Timer(rospy.Duration(0.05), publish_fake_tf_loop)
         
         rospy.Subscriber(occupied_topic, Marker, occupied_callback)
         rospy.Subscriber(preblocked_topic, Marker, preblocked_callback)
@@ -169,7 +221,8 @@ def startup_event():
         rospy.Subscriber(risk_cost_topic, PointCloud2, risk_cost_callback)
         rospy.Subscriber(path_topic, ROSPath, path_callback)
         rospy.Subscriber(odom_topic, Odometry, odom_callback)
-        print(f"ROS 节点已启动，里程计({odom_topic})、地图({occupied_topic})与发布者就绪")
+        rospy.Subscriber(status_text_topic, String, status_text_callback)
+        print(f"ROS 节点已启动，里程计({odom_topic})、地图({occupied_topic})与发布者就绪 (publish_fake_tf={publish_fake_tf})")
     except Exception as e:
         print(f"ROS 初始化警告 (非ROS环境可忽略): {e}")
 
@@ -248,15 +301,17 @@ async def load_map(req: MapDataRequest):
                 marker.points.append(p)
             ros_pubs["preblocked"].publish(marker)
 
-    # 3. 等待并收集 ROS 话题发送的已更新地图图层数据
-    # 等待时间最大设为 3.0 秒，保障底层 C++ 规划器能接收并计算完毕
-    timeout = 3.0
+    # 3. 等待底层 C++ 节点 (OctoGlobalPlanner) 接收地图并完成 pre-build 预构建（发布 traversable 消息）
+    timeout = 15.0
     start_wait = asyncio.get_event_loop().time()
     while asyncio.get_event_loop().time() - start_wait < timeout:
         occ = latest_ros_data["occupied"]
         pre = latest_ros_data["preblocked"]
+        tra = latest_ros_data["traversable"]
         if (occ is not None and occ.get("stamp", rospy.Time(0)) >= t_start and
-            pre is not None and pre.get("stamp", rospy.Time(0)) >= t_start):
+            pre is not None and pre.get("stamp", rospy.Time(0)) >= t_start and
+            tra is not None and tra.get("stamp", rospy.Time(0)) >= t_start):
+            print(f"[load_map] C++ OctoGlobalPlanner pre-build completed in {asyncio.get_event_loop().time() - start_wait:.2f}s.", flush=True)
             break
         await asyncio.sleep(0.05)
 
@@ -508,7 +563,36 @@ async def set_start(req: PointRequest):
         msg.point.y = req.y
         msg.point.z = req.z
         ros_pubs["start_pub"].publish(msg)
-        return {"status": "success", "message": f"起点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"}
+        
+        msg_txt = f"起点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"
+        
+        if publish_fake_tf and tf_broadcaster is not None:
+            try:
+                global fake_robot_pose, latest_odom_pose
+                fake_robot_pose = {"x": req.x, "y": req.y, "z": req.z}
+                
+                # 手动设定起点后立即主动广播 1 次
+                publish_fake_tf_loop(None)
+                
+                # 构造并同步最新的 Odom 数据给 /loc_base
+                now_stamp = rospy.Time.now()
+                child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
+                odom_msg = Odometry()
+                odom_msg.header.stamp = now_stamp
+                odom_msg.header.frame_id = "map"
+                odom_msg.child_frame_id = child_frame
+                odom_msg.pose.pose.position.x = req.x
+                odom_msg.pose.pose.position.y = req.y
+                odom_msg.pose.pose.position.z = req.z
+                odom_msg.pose.pose.orientation.w = 1.0
+                
+                latest_odom_pose = odom_msg.pose.pose
+                msg_txt += " (已自动广播 20Hz 实时伪 TF 树: map -> odom -> base_footprint)"
+                print(f"[publish_fake_tf] 已更新并以 20Hz 持续广播伪 TF (map -> odom -> {child_frame}): [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]")
+            except Exception as e:
+                print(f"发布伪 TF 失败: {e}")
+                
+        return {"status": "success", "message": msg_txt}
     else:
         raise HTTPException(status_code=500, detail="ROS 起点发布器未启动")
 
@@ -618,6 +702,10 @@ async def set_goal(req: PointRequest):
 @app.get("/api/get_path")
 async def get_path():
     return {"path": latest_planned_path}
+
+@app.get("/api/get_status_text")
+async def get_status_text():
+    return {"status_text": latest_status_text}
 
 @app.get("/api/get_robot_pose")
 async def get_robot_pose():
