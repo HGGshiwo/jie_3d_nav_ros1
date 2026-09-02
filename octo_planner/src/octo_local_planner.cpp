@@ -875,6 +875,36 @@ void OctoLocalPlanner::renderTrackingDebugViewImpl()
     last_cmd_vel_.linear.x, last_cmd_vel_.linear.y, last_cmd_vel_.angular.z);
   cv::putText(image, cmd_text, {16, 82}, cv::FONT_HERSHEY_SIMPLEX, 0.50, cv::Scalar(120, 230, 255), 1, cv::LINE_AA);
 
+  double final_yaw_error = 0.0;
+  if (drawFinalGoalYaw(image, robot_pose, center, ppm, final_yaw_error)) {
+    const auto & goal_p = global_plan_.back().pose.position;
+    const double pos_error = std::hypot(goal_p.x - robot_pose.x, goal_p.y - robot_pose.y);
+    char goal_err_text[160];
+    std::snprintf(goal_err_text, sizeof(goal_err_text), "goal err: pos=%.3fm yaw=%.1f deg (dx=%.2f dy=%.2f)",
+                  pos_error, final_yaw_error * 180.0 / M_PI,
+                  goal_p.x - robot_pose.x, goal_p.y - robot_pose.y);
+    cv::putText(image, goal_err_text, {16, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.50, cv::Scalar(0, 230, 255), 1, cv::LINE_AA);
+  }
+
+  char tol_text[160];
+  std::snprintf(tol_text, sizeof(tol_text), "thresholds: pos_tol=%.2fm yaw_tol=%.2frad (%.1fdeg)",
+    goal_pos_tol_, goal_yaw_tol_, goal_yaw_tol_ * 180.0 / M_PI);
+  cv::putText(image, tol_text, {16, 132}, cv::FONT_HERSHEY_SIMPLEX, 0.50, cv::Scalar(255, 200, 100), 1, cv::LINE_AA);
+
+  bool pos_ok = false, yaw_ok = false;
+  if (!global_plan_.empty()) {
+    geometry_msgs::PoseStamped final_pose_base;
+    if (transformToBase(global_plan_.back(), final_pose_base)) {
+      pos_ok = std::hypot(final_pose_base.pose.position.x, final_pose_base.pose.position.y) < goal_pos_tol_;
+    }
+    yaw_ok = !align_final_yaw_ || std::abs(final_yaw_error) < goal_yaw_tol_;
+  }
+  char status_text[160];
+  std::snprintf(status_text, sizeof(status_text), "status: pos_ok=%d yaw_ok=%d adjusting=%d",
+    pos_ok ? 1 : 0, yaw_ok ? 1 : 0, pose_adjusting_ ? 1 : 0);
+  cv::putText(image, status_text, {16, 154}, cv::FONT_HERSHEY_SIMPLEX, 0.50,
+    (pos_ok && yaw_ok) ? cv::Scalar(100, 255, 100) : cv::Scalar(100, 150, 255), 1, cv::LINE_AA);
+
   // Construct and publish ROS Image message to allow RViz visualization
   if (debug_image_pub_.getNumSubscribers() > 0)
   {

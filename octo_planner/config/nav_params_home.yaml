@@ -23,17 +23,24 @@ d1_controller:
     tracking_debug_view_frequency: 10.0
 
     # Speed tracking gains.
-    linear_gain: 1.0
-    lateral_gain: 0.8
-    heading_gain: 0.8
-    cross_track_angular_gain: 0.5
-    final_yaw_gain: 0.3
+    lookahead_distance: 0.45
+    linear_gain: 1.2
+    lateral_gain: 0.4
+    heading_gain: 1.2
+    cross_track_angular_gain: 0.0
+    final_yaw_gain: 0.5
 
     # Motion mode and limits.
     enable_lateral_motion: true
-    max_linear_speed: 0.7
-    max_lateral_speed: 0.5
-    max_angular_speed: 0.9
+    max_linear_speed: 0.6
+    max_lateral_speed: 0.3
+    max_angular_speed: 1.0
+
+    # Acceleration limits & Motion decoupling (Rollover Prevention).
+    max_linear_acc: 0.8
+    max_lateral_acc: 0.4
+    max_angular_acc: 1.2
+    enable_lateral_decoupling: true
 
     # Deadbands and goal tolerances.
     align_final_yaw: true

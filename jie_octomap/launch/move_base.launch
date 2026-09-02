@@ -19,10 +19,12 @@
         <!-- Pass octomap topic to global planner -->
         <param name="OctoGlobalPlanner/octomap_topic" value="$(arg global_octomap_topic)"/>
         <param name="OctoLocalPlanner/octomap_topic" value="/octomap_local"/>
+        <param name="D1LocalPlanner/octomap_topic" value="/octomap_local"/>
 
         <!-- 加载全局统一 3D 规划器参数配置 -->
         <rosparam file="$(find octo_planner)/config/planner_params.yaml" command="load" ns="OctoGlobalPlanner" />
         <rosparam file="$(find octo_planner)/config/planner_params.yaml" command="load" ns="OctoLocalPlanner" />
+        <rosparam file="$(find octo_planner)/config/planner_params.yaml" command="load" ns="D1LocalPlanner" />
 
         <rosparam>
             OctoLocalPlanner:
@@ -67,7 +69,43 @@
                 linear_deadband: 0.01
                 lateral_deadband: 0.01
                 angular_deadband: 0.01
-                goal_position_tolerance: 0.1
+                goal_position_tolerance: 0.2
+                goal_yaw_tolerance: 0.2
+
+            D1LocalPlanner:
+                # Path tracking geometry
+                lookahead_distance: 1.00
+                robot_center_offset_frame: odin1_base_link
+                robot_center_offset_x: -0.18
+                robot_center_offset_y: 0.0
+                robot_center_offset_z: 0.0
+                tracking_point_reached_xy_tolerance: 0.40
+                tracking_point_marker_scale: 0.28
+
+                # OpenCV top-down debug view
+                enable_tracking_debug_view: true
+                tracking_debug_view_size_px: 640
+                tracking_debug_view_pixels_per_meter: 80.0
+                tracking_debug_view_frequency: 10.0
+
+                # Speed tracking gains
+                linear_gain: 1.5
+                lateral_gain: 0.8
+                heading_gain: 1.2
+                final_yaw_gain: 0.5
+
+                # Motion mode and limits
+                enable_lateral_motion: true
+                max_linear_speed: 0.7
+                max_lateral_speed: 0.5
+                max_angular_speed: 0.9
+
+                # Deadbands and goal tolerances
+                align_final_yaw: true
+                linear_deadband: 0.01
+                lateral_deadband: 0.01
+                angular_deadband: 0.01
+                goal_position_tolerance: 0.2
                 goal_yaw_tolerance: 0.2
         </rosparam>
 

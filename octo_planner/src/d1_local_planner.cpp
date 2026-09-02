@@ -4,10 +4,8 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <algorithm>
 #include <cmath>
-#include <cctype>
 #include <limits>
 
-// Register this planner as a BaseLocalPlanner plugin
 PLUGINLIB_EXPORT_CLASS(octo_planner::D1LocalPlanner, nav_core::BaseLocalPlanner)
 
 namespace octo_planner
@@ -19,8 +17,7 @@ D1LocalPlanner::D1LocalPlanner()
   initialized_(false),
   target_index_(0),
   pose_adjusting_(false),
-  goal_reached_(true),
-  debug_view_disabled_(false)
+  goal_reached_(true)
 {
 }
 
@@ -49,34 +46,43 @@ void D1LocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_2
   private_nh.param<double>     ("robot_center_offset_x",        robot_center_offset_x_,        -0.18);
   private_nh.param<double>     ("robot_center_offset_y",        robot_center_offset_y_,         0.0);
   private_nh.param<double>     ("robot_center_offset_z",        robot_center_offset_z_,         0.0);
-  private_nh.param<double>     ("lookahead_distance",           lookahead_distance_,            0.20);
+  private_nh.param<double>     ("lookahead_distance",           lookahead_distance_,            0.45);
   private_nh.param<double>     ("tracking_point_reached_xy_tolerance", tracking_xy_tol_,        0.20);
-  private_nh.param<double>     ("tracking_point_marker_scale",  tracking_marker_scale_,         0.28);
-  private_nh.param<bool>       ("enable_tracking_debug_view",   enable_debug_view_,             true);
-  private_nh.param<int>        ("tracking_debug_view_size_px",  debug_view_size_px_,            640);
-  private_nh.param<double>     ("tracking_debug_view_pixels_per_meter", debug_ppm_,             80.0);
-  private_nh.param<double>     ("tracking_debug_view_frequency",debug_view_frequency_,          10.0);
   private_nh.param<double>     ("goal_position_tolerance",      goal_pos_tol_,                  0.05);
   private_nh.param<double>     ("goal_yaw_tolerance",           goal_yaw_tol_,                  0.10);
-  private_nh.param<double>     ("linear_gain",                  linear_gain_,                   1.5);
-  private_nh.param<double>     ("lateral_gain",                 lateral_gain_,                  1.5);
-  private_nh.param<double>     ("heading_gain",                 heading_gain_,                  2.5);
-  private_nh.param<double>     ("cross_track_angular_gain",     cross_track_angular_gain_,      1.0);
+  private_nh.param<double>     ("linear_gain",                  linear_gain_,                   1.2);
+  private_nh.param<double>     ("lateral_gain",                 lateral_gain_,                  0.4);
+  private_nh.param<double>     ("heading_gain",                 heading_gain_,                  1.2);
   private_nh.param<double>     ("final_yaw_gain",               final_yaw_gain_,                0.5);
   private_nh.param<bool>       ("enable_lateral_motion",        enable_lateral_motion_,         true);
-  private_nh.param<double>     ("max_linear_speed",             max_linear_speed_,              0.60);
-  private_nh.param<double>     ("max_lateral_speed",            max_lateral_speed_,             0.60);
-  private_nh.param<double>     ("max_angular_speed",            max_angular_speed_,             1.50);
   private_nh.param<bool>       ("align_final_yaw",              align_final_yaw_,               true);
-  private_nh.param<double>     ("linear_deadband",              linear_deadband_,               0.05);
-  private_nh.param<double>     ("lateral_deadband",             lateral_deadband_,              0.05);
-  private_nh.param<double>     ("angular_deadband",             angular_deadband_,              0.05);
 
-  std::string tracking_marker_topic;
-  private_nh.param<std::string>("tracking_point_marker_topic",  tracking_marker_topic,        "tracking_point_marker");
-  marker_pub_ = private_nh.advertise<visualization_msgs::Marker>(tracking_marker_topic, 1, /*latch=*/true);
+  VelocitySmootherParams smoother_params;
+  private_nh.param<double>("max_linear_speed",          smoother_params.max_linear_speed,          0.60);
+  private_nh.param<double>("max_lateral_speed",         smoother_params.max_lateral_speed,         0.30);
+  private_nh.param<double>("max_angular_speed",         smoother_params.max_angular_speed,         1.00);
+  private_nh.param<double>("max_linear_acc",           smoother_params.max_linear_acc,           0.80);
+  private_nh.param<double>("max_lateral_acc",          smoother_params.max_lateral_acc,          0.40);
+  private_nh.param<double>("max_angular_acc",          smoother_params.max_angular_acc,          1.20);
+  private_nh.param<bool>  ("enable_lateral_decoupling", smoother_params.enable_lateral_decoupling, true);
+  private_nh.param<double>("linear_deadband",           smoother_params.linear_deadband,           0.05);
+  private_nh.param<double>("lateral_deadband",          smoother_params.lateral_deadband,          0.05);
+  private_nh.param<double>("angular_deadband",          smoother_params.angular_deadband,          0.05);
+  velocity_smoother_.setParams(smoother_params);
 
-  if (enable_debug_view_)
+  DebugVisualizerParams vis_params;
+  vis_params.map_frame = map_frame_;
+  private_nh.param<std::string>("tracking_point_marker_topic",   vis_params.tracking_marker_topic,  "tracking_point_marker");
+  private_nh.param<double>     ("tracking_point_marker_scale",   vis_params.tracking_marker_scale,  0.28);
+  private_nh.param<bool>       ("enable_tracking_debug_view",    vis_params.enable_debug_view,      true);
+  private_nh.param<int>        ("tracking_debug_view_size_px",   vis_params.debug_view_size_px,     640);
+  private_nh.param<double>     ("tracking_debug_view_pixels_per_meter", vis_params.debug_ppm,      80.0);
+  private_nh.param<double>     ("tracking_debug_view_frequency", debug_view_frequency_,          10.0);
+  vis_params.debug_view_frequency = debug_view_frequency_;
+
+  visualizer_.initialize(private_nh, vis_params, "d1_local_planner_debug");
+
+  if (vis_params.enable_debug_view)
   {
     const double debug_period = 1.0 / std::max(1.0, debug_view_frequency_);
     debug_view_timer_ = nh_.createTimer(ros::Duration(debug_period), &D1LocalPlanner::renderTrackingDebugView, this);
@@ -94,22 +100,25 @@ bool D1LocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan
     return false;
   }
 
+  velocity_smoother_.reset();
+  last_control_time_ = ros::Time(0);
+
   if (plan.empty())
   {
     global_plan_.clear();
     target_index_ = 0;
     pose_adjusting_ = false;
     goal_reached_ = true;
-    clearTrackingPointMarker();
+    visualizer_.clearTrackingPointMarker();
     return true;
   }
 
   global_plan_ = plan;
-  target_index_ = findInitialTargetIndex3D();
+  target_index_ = 0;
   pose_adjusting_ = false;
   goal_reached_ = false;
-  publishTrackingPointMarker();
-  ROS_INFO("D1LocalPlanner: Plan set with %zu points. Initial target index: %d", global_plan_.size(), target_index_);
+  visualizer_.publishTrackingPointMarker(global_plan_, target_index_);
+  ROS_INFO("D1LocalPlanner: Plan set with %zu points.", global_plan_.size());
   return true;
 }
 
@@ -134,6 +143,17 @@ bool D1LocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     return true;
   }
 
+  ros::Time now = ros::Time::now();
+  double dt = 0.05;
+  if (!last_control_time_.isZero())
+  {
+    dt = (now - last_control_time_).toSec();
+    if (dt <= 1.0e-4 || dt > 0.5) dt = 0.05;
+  }
+  last_control_time_ = now;
+
+  geometry_msgs::Twist raw_cmd;
+
   if (pose_adjusting_)
   {
     geometry_msgs::PoseStamped final_pose_base;
@@ -143,12 +163,8 @@ bool D1LocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
       return false;
     }
 
-    cmd_vel.linear.x = clamp(final_pose_base.pose.position.x * linear_gain_,  -max_linear_speed_,  max_linear_speed_);
-    cmd_vel.linear.y = enable_lateral_motion_
-                       ? clamp(final_pose_base.pose.position.y * lateral_gain_, -max_lateral_speed_, max_lateral_speed_)
-                       : 0.0;
-    cmd_vel.linear.x = applyDeadband(cmd_vel.linear.x, linear_deadband_);
-    cmd_vel.linear.y = applyDeadband(cmd_vel.linear.y, lateral_deadband_);
+    raw_cmd.linear.x = final_pose_base.pose.position.x * linear_gain_;
+    raw_cmd.linear.y = enable_lateral_motion_ ? final_pose_base.pose.position.y * lateral_gain_ : 0.0;
 
     double final_yaw_error = 0.0;
     if (align_final_yaw_)
@@ -158,8 +174,7 @@ bool D1LocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         cmd_vel = geometry_msgs::Twist();
         return false;
       }
-      cmd_vel.angular.z = clamp(final_yaw_error * final_yaw_gain_, -max_angular_speed_, max_angular_speed_);
-      cmd_vel.angular.z = applyDeadband(cmd_vel.angular.z, angular_deadband_);
+      raw_cmd.angular.z = final_yaw_error * final_yaw_gain_;
     }
 
     const bool pos_ok = std::hypot(final_pose_base.pose.position.x, final_pose_base.pose.position.y) < goal_pos_tol_;
@@ -167,11 +182,14 @@ bool D1LocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     if (pos_ok && yaw_ok)
     {
       goal_reached_ = true;
-      clearTrackingPointMarker();
+      visualizer_.clearTrackingPointMarker();
+      velocity_smoother_.reset();
       cmd_vel = geometry_msgs::Twist();
       ROS_INFO("D1LocalPlanner: Goal reached.");
+      return true;
     }
-    
+
+    cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
     last_cmd_vel_ = cmd_vel;
     return true;
   }
@@ -195,12 +213,8 @@ bool D1LocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
       return false;
     }
 
-    cmd_vel.linear.x = clamp(final_pose_base.pose.position.x * linear_gain_,  -max_linear_speed_,  max_linear_speed_);
-    cmd_vel.linear.y = enable_lateral_motion_
-                       ? clamp(final_pose_base.pose.position.y * lateral_gain_, -max_lateral_speed_, max_lateral_speed_)
-                       : 0.0;
-    cmd_vel.linear.x = applyDeadband(cmd_vel.linear.x, linear_deadband_);
-    cmd_vel.linear.y = applyDeadband(cmd_vel.linear.y, lateral_deadband_);
+    raw_cmd.linear.x = final_pose_base.pose.position.x * linear_gain_;
+    raw_cmd.linear.y = enable_lateral_motion_ ? final_pose_base.pose.position.y * lateral_gain_ : 0.0;
 
     double final_yaw_error = 0.0;
     if (align_final_yaw_)
@@ -210,41 +224,41 @@ bool D1LocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         cmd_vel = geometry_msgs::Twist();
         return false;
       }
-      cmd_vel.angular.z = clamp(final_yaw_error * final_yaw_gain_, -max_angular_speed_, max_angular_speed_);
-      cmd_vel.angular.z = applyDeadband(cmd_vel.angular.z, angular_deadband_);
+      raw_cmd.angular.z = final_yaw_error * final_yaw_gain_;
     }
 
-    const bool pos_ok = std::hypot(final_pose_base.pose.position.x, final_pose_base.pose.position.y) < goal_pos_tol_;
-    const bool yaw_ok = !align_final_yaw_ || std::abs(final_yaw_error) < goal_yaw_tol_;
-    if (pos_ok && yaw_ok)
-    {
-      goal_reached_ = true;
-      clearTrackingPointMarker();
-      cmd_vel = geometry_msgs::Twist();
-      ROS_INFO("D1LocalPlanner: Goal reached.");
-    }
-    
+    cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
     last_cmd_vel_ = cmd_vel;
     return true;
   }
 
-  const double heading_error = std::atan2(target.base_y, std::max(1.0e-6, target.base_x));
-  cmd_vel.linear.x  = clamp(target.base_x * linear_gain_,  -max_linear_speed_,  max_linear_speed_);
-  cmd_vel.linear.y  = enable_lateral_motion_
-                      ? clamp(target.base_y * lateral_gain_, -max_lateral_speed_, max_lateral_speed_)
-                      : 0.0;
-  cmd_vel.angular.z = clamp(heading_error * heading_gain_ + target.base_y * cross_track_angular_gain_,
-                            -max_angular_speed_, max_angular_speed_);
-  cmd_vel.linear.x  = applyDeadband(cmd_vel.linear.x,  linear_deadband_);
-  cmd_vel.linear.y  = applyDeadband(cmd_vel.linear.y,  lateral_deadband_);
-  cmd_vel.angular.z = applyDeadband(cmd_vel.angular.z, angular_deadband_);
+  // 1. Decoupled Pure Pursuit: smooth heading error calculation
+  const double heading_error = std::atan2(target.base_y, std::max(0.05, target.base_x));
+
+  // 2. Smooth cruise forward velocity (cruise speed + cornering adapt + goal ramp down)
+  RobotPose2D robot_pose;
+  double dist_to_goal = 1.0;
+  if (lookupRobotPose2D(robot_pose) && !global_plan_.empty()) {
+    const auto & g = global_plan_.back().pose.position;
+    dist_to_goal = std::hypot(g.x - robot_pose.x, g.y - robot_pose.y);
+  }
+
+  const double cruise_speed = velocity_smoother_.getParams().max_linear_speed;
+  const double corner_scale = std::max(0.3, std::cos(heading_error));
+  const double goal_scale   = dist_to_goal < 0.6 ? std::max(0.0, dist_to_goal / 0.6) : 1.0;
+
+  raw_cmd.linear.x  = cruise_speed * corner_scale * goal_scale;
+  raw_cmd.linear.y  = enable_lateral_motion_ ? target.base_y * lateral_gain_ : 0.0;
+  raw_cmd.angular.z = heading_error * heading_gain_;
+
+  cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
+  last_cmd_vel_ = cmd_vel;
 
   ROS_INFO_THROTTLE(1.0,
     "D1LocalPlanner: Track target: x=%.3f y=%.3f heading_err=%.3f cmd=(%.3f, %.3f, %.3f)",
     target.base_x, target.base_y, heading_error,
     cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z);
 
-  last_cmd_vel_ = cmd_vel;
   return true;
 }
 
@@ -260,26 +274,12 @@ bool D1LocalPlanner::isGoalReached()
 
 bool D1LocalPlanner::isFinalTrackingPointReached(const TrackingTarget & target) const
 {
-  if (global_plan_.empty() || target_index_ != static_cast<int>(global_plan_.size()) - 1)
+  if (global_plan_.empty() || target_index_ < static_cast<int>(global_plan_.size()) - 3)
     return false;
-  return std::hypot(target.base_x, target.base_y) < tracking_xy_tol_;
-}
-
-int D1LocalPlanner::findInitialTargetIndex3D()
-{
-  if (global_plan_.empty()) return 0;
   RobotPose2D robot_pose;
-  if (!lookupRobotPose2D(robot_pose)) {
-    ROS_WARN("D1LocalPlanner: Failed to get robot pose. Start tracking from path index 0."); return 0;
-  }
-  int nearest = 0; double nearest_sq = std::numeric_limits<double>::max();
-  for (std::size_t i = 0; i < global_plan_.size(); ++i) {
-    const auto & p = global_plan_[i].pose.position;
-    const double dx = p.x - robot_pose.x, dy = p.y - robot_pose.y, dz = p.z - robot_pose.z;
-    const double sq = dx*dx + dy*dy + dz*dz;
-    if (sq < nearest_sq) { nearest_sq = sq; nearest = static_cast<int>(i); }
-  }
-  return nearest;
+  if (!const_cast<D1LocalPlanner*>(this)->lookupRobotPose2D(robot_pose)) return false;
+  const auto & goal_pos = global_plan_.back().pose.position;
+  return std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y) < tracking_xy_tol_;
 }
 
 bool D1LocalPlanner::selectTrackingTarget(TrackingTarget & target)
@@ -288,23 +288,16 @@ bool D1LocalPlanner::selectTrackingTarget(TrackingTarget & target)
   RobotPose2D robot_pose;
   if (!lookupRobotPose2D(robot_pose)) return false;
 
-  const double reached_tol = tracking_xy_tol_;
-  if (xyDistanceToPlanPoint(robot_pose, target_index_) < reached_tol
-      && target_index_ < static_cast<int>(global_plan_.size()) - 1)
+  const int prev_idx = target_index_;
+  if (!D1ControlUtils::interpolateLookaheadTarget(
+        global_plan_, robot_pose, target_index_, lookahead_distance_, target))
   {
-    int next = target_index_;
-    for (int i = target_index_ + 1; i < static_cast<int>(global_plan_.size()); ++i) {
-      if (xyDistanceToPlanPoint(robot_pose, i) > reached_tol) { next = i; break; }
-      if (i == static_cast<int>(global_plan_.size()) - 1) next = i;
-    }
-    if (next != target_index_) { target_index_ = next; publishTrackingPointMarker(); }
+    return false;
   }
 
-  const auto & tp = global_plan_[static_cast<std::size_t>(target_index_)].pose.position;
-  const double dx_map = tp.x - robot_pose.x, dy_map = tp.y - robot_pose.y;
-  const double cy = std::cos(robot_pose.yaw), sy = std::sin(robot_pose.yaw);
-  target.base_x =  cy * dx_map + sy * dy_map;
-  target.base_y = -sy * dx_map + cy * dy_map;
+  if (target_index_ != prev_idx) {
+    visualizer_.publishTrackingPointMarker(global_plan_, target_index_);
+  }
   return true;
 }
 
@@ -333,12 +326,6 @@ bool D1LocalPlanner::lookupRobotPose2D(RobotPose2D & robot_pose)
   return false;
 }
 
-double D1LocalPlanner::xyDistanceToPlanPoint(const RobotPose2D & rp, int idx) const
-{
-  const auto & p = global_plan_[static_cast<std::size_t>(idx)].pose.position;
-  return std::hypot(p.x - rp.x, p.y - rp.y);
-}
-
 bool D1LocalPlanner::computeFinalYawErrorXY(const geometry_msgs::PoseStamped & final_pose_in, double & yaw_error)
 {
   RobotPose2D robot_pose;
@@ -354,7 +341,7 @@ bool D1LocalPlanner::computeFinalYawErrorXY(const geometry_msgs::PoseStamped & f
       final_pose.header.frame_id.c_str(), map_frame_.c_str(), ex.what());
     return false;
   }
-  yaw_error = normalizeAngle(tf2::getYaw(final_pose.pose.orientation) - robot_pose.yaw);
+  yaw_error = D1ControlUtils::normalizeAngle(tf2::getYaw(final_pose.pose.orientation) - robot_pose.yaw);
   return true;
 }
 
@@ -385,7 +372,7 @@ std::vector<std::string> D1LocalPlanner::getBaseFrameCandidates() const
       candidates.push_back(f);
   };
   add(base_frame_);
-  for (const auto & f : splitCsv(base_frame_candidates_str_)) add(f);
+  for (const auto & f : D1ControlUtils::splitCsv(base_frame_candidates_str_)) add(f);
   return candidates;
 }
 
@@ -409,152 +396,24 @@ void D1LocalPlanner::applyRobotCenterOffsetToRelativePose(const std::string & fr
   pose.pose.position.z -= robot_center_offset_z_;
 }
 
-void D1LocalPlanner::publishTrackingPointMarker()
-{
-  if (global_plan_.empty()) { clearTrackingPointMarker(); return; }
-  visualization_msgs::Marker marker;
-  marker.header.frame_id = map_frame_;
-  marker.header.stamp    = ros::Time::now();
-  marker.ns     = "d1_tracking_point";
-  marker.id     = 0;
-  marker.type   = visualization_msgs::Marker::SPHERE;
-  marker.action = visualization_msgs::Marker::ADD;
-  marker.pose   = global_plan_[static_cast<std::size_t>(target_index_)].pose;
-  marker.scale.x = marker.scale.y = marker.scale.z = tracking_marker_scale_;
-  marker.color.r = 0.1f; marker.color.g = 0.65f; marker.color.b = 1.0f; marker.color.a = 0.95f;
-  marker_pub_.publish(marker);
-}
-
-void D1LocalPlanner::clearTrackingPointMarker()
-{
-  visualization_msgs::Marker marker;
-  marker.header.frame_id = map_frame_;
-  marker.header.stamp    = ros::Time::now();
-  marker.ns     = "d1_tracking_point";
-  marker.id     = 0;
-  marker.action = visualization_msgs::Marker::DELETE;
-  marker_pub_.publish(marker);
-}
-
 void D1LocalPlanner::renderTrackingDebugView(const ros::TimerEvent &)
 {
-  try { renderTrackingDebugViewImpl(); }
-  catch (const std::exception & ex) {
-    ROS_WARN_THROTTLE(2.0, "D1LocalPlanner: OpenCV tracking debug view exception: %s", ex.what());
-  }
-}
-
-void D1LocalPlanner::renderTrackingDebugViewImpl()
-{
-  if (!enable_debug_view_ || debug_view_disabled_ || global_plan_.empty()) return;
   RobotPose2D robot_pose;
   if (!lookupRobotPose2D(robot_pose)) return;
-
-  const int sz = std::max(240, debug_view_size_px_);
-  const double ppm = std::max(10.0, debug_ppm_);
-  const cv::Point center(sz / 2, sz / 2);
-  cv::Mat image(sz, sz, CV_8UC3, cv::Scalar(18, 24, 28));
-
-  cv::line(image, {center.x, 0}, {center.x, sz}, cv::Scalar(48, 64, 70), 1);
-  cv::line(image, {0, center.y}, {sz, center.y}, cv::Scalar(48, 64, 70), 1);
-  cv::arrowedLine(image, center, {center.x, center.y - 58}, cv::Scalar(230, 230, 230), 2, cv::LINE_AA, 0, 0.25);
-  cv::circle(image, center, 8, cv::Scalar(230, 230, 230), -1, cv::LINE_AA);
-  cv::putText(image, "robot +X", {center.x + 10, center.y - 62},
-    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(230, 230, 230), 1, cv::LINE_AA);
-
-  std::vector<cv::Point> proj;
-  proj.reserve(global_plan_.size());
-  for (const auto & pose : global_plan_)
-    proj.push_back(projectPlanPoint(robot_pose, pose, center, ppm));
-
-  for (std::size_t i = 1; i < proj.size(); ++i)
-    cv::line(image, proj[i - 1], proj[i], cv::Scalar(120, 120, 120), 1, cv::LINE_AA);
-  for (const auto & pt : proj)
-    cv::circle(image, pt, 3, cv::Scalar(90, 210, 90), -1, cv::LINE_AA);
-
-  if (target_index_ >= 0 && target_index_ < static_cast<int>(proj.size())) {
-    cv::circle(image, proj[target_index_], 12, cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
-    cv::circle(image, proj[target_index_],  4, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
+  bool pos_ok = false, yaw_ok = false;
+  if (!global_plan_.empty()) {
+    geometry_msgs::PoseStamped final_pose_base;
+    if (transformToBase(global_plan_.back(), final_pose_base)) {
+      pos_ok = std::hypot(final_pose_base.pose.position.x, final_pose_base.pose.position.y) < goal_pos_tol_;
+    }
+    double yaw_err = 0.0;
+    if (computeFinalYawErrorXY(global_plan_.back(), yaw_err)) {
+      yaw_ok = !align_final_yaw_ || std::abs(yaw_err) < goal_yaw_tol_;
+    }
   }
-
-  double final_yaw_error = 0.0;
-  if (drawFinalGoalYaw(image, robot_pose, center, ppm, final_yaw_error)) {
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "goal yaw err: %.1f deg", final_yaw_error * 180.0 / M_PI);
-    cv::putText(image, buf, {16, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 230, 255), 1, cv::LINE_AA);
-  }
-
-  cv::putText(image, "tracking index: " + std::to_string(target_index_),
-    {16, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(80, 190, 255), 2, cv::LINE_AA);
-  char pose_text[160];
-  std::snprintf(pose_text, sizeof(pose_text), "robot map: x=%.2f y=%.2f yaw=%.1f deg",
-    robot_pose.x, robot_pose.y, robot_pose.yaw * 180.0 / M_PI);
-  cv::putText(image, pose_text, {16, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
-  char cmd_text[160];
-  std::snprintf(cmd_text, sizeof(cmd_text), "cmd vel: x=%.3f y=%.3f wz=%.3f",
-    last_cmd_vel_.linear.x, last_cmd_vel_.linear.y, last_cmd_vel_.angular.z);
-  cv::putText(image, cmd_text, {16, 82}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(120, 230, 255), 1, cv::LINE_AA);
-  cv::putText(image, "top = robot forward, red = current target",
-    {16, sz - 18}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(180, 200, 210), 1, cv::LINE_AA);
-
-  try {
-    cv::imshow("d1_local_planner_debug", image);
-    cv::waitKey(1);
-  } catch (const cv::Exception & ex) {
-    debug_view_disabled_ = true;
-    ROS_WARN("D1LocalPlanner: Disable OpenCV tracking debug view: %s", ex.what());
-  }
-}
-
-cv::Point D1LocalPlanner::projectPlanPoint(
-  const RobotPose2D & rp,
-  const geometry_msgs::PoseStamped & pose,
-  const cv::Point & center, double ppm) const
-{
-  const double dx = pose.pose.position.x - rp.x, dy = pose.pose.position.y - rp.y;
-  const double cy = std::cos(rp.yaw), sy = std::sin(rp.yaw);
-  const double base_x = cy * dx + sy * dy, base_y = -sy * dx + cy * dy;
-  return cv::Point(
-    static_cast<int>(std::round(center.x - base_y * ppm)),
-    static_cast<int>(std::round(center.y - base_x * ppm)));
-}
-
-bool D1LocalPlanner::drawFinalGoalYaw(
-  cv::Mat & image, const RobotPose2D & rp,
-  const cv::Point & center, double ppm, double & yaw_error) const
-{
-  if (global_plan_.empty()) return false;
-  const auto & fp = global_plan_.back();
-  const cv::Point fp_px = projectPlanPoint(rp, fp, center, ppm);
-  const double goal_yaw = tf2::getYaw(fp.pose.orientation);
-  yaw_error = normalizeAngle(goal_yaw - rp.yaw);
-  const double arrow_len = std::max(26.0, ppm * 0.35);
-  const cv::Point arrow_end(
-    static_cast<int>(std::round(fp_px.x - std::sin(yaw_error) * arrow_len)),
-    static_cast<int>(std::round(fp_px.y - std::cos(yaw_error) * arrow_len)));
-  cv::circle(image, fp_px, 10, cv::Scalar(0, 230, 255), 2, cv::LINE_AA);
-  cv::arrowedLine(image, fp_px, arrow_end, cv::Scalar(0, 230, 255), 2, cv::LINE_AA, 0, 0.30);
-  return true;
-}
-
-std::vector<std::string> D1LocalPlanner::splitCsv(const std::string & text)
-{
-  std::vector<std::string> parts; std::string cur;
-  for (const char ch : text) {
-    if (ch == ',') { const auto t = trim(cur); if (!t.empty()) parts.push_back(t); cur.clear(); }
-    else cur.push_back(ch);
-  }
-  const auto t = trim(cur); if (!t.empty()) parts.push_back(t);
-  return parts;
-}
-
-std::string D1LocalPlanner::trim(const std::string & text)
-{
-  std::size_t first = 0;
-  while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
-  std::size_t last = text.size();
-  while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1]))) --last;
-  return text.substr(first, last - first);
+  visualizer_.renderDebugView(
+    robot_pose, global_plan_, target_index_, last_cmd_vel_,
+    goal_pos_tol_, goal_yaw_tol_, pos_ok, yaw_ok, pose_adjusting_);
 }
 
 } // namespace octo_planner

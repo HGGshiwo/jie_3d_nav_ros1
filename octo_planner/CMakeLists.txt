@@ -84,7 +84,11 @@ target_link_libraries(octo_global_planner_plugin
 add_dependencies(octo_global_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 # ---- d1_controller ----
-add_executable(d1_controller src/d1_controller.cpp)
+add_executable(d1_controller
+  src/d1_controller.cpp
+  src/d1_velocity_smoother.cpp
+  src/d1_debug_visualizer.cpp
+)
 target_link_libraries(d1_controller
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
@@ -92,7 +96,11 @@ target_link_libraries(d1_controller
 add_dependencies(d1_controller ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 # ---- d1_local_planner_plugin ----
-add_library(d1_local_planner_plugin src/d1_local_planner.cpp)
+add_library(d1_local_planner_plugin
+  src/d1_local_planner.cpp
+  src/d1_velocity_smoother.cpp
+  src/d1_debug_visualizer.cpp
+)
 target_link_libraries(d1_local_planner_plugin
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
