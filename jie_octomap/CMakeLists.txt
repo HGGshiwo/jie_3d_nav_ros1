@@ -15,7 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_msgs
 )
 
-find_package(octomap REQUIRED)
+find_package(OCTOMAP REQUIRED)
 find_package(Open3D QUIET)
 find_library(TINYXML2_LIB tinyxml2 REQUIRED)
 catkin_python_setup()

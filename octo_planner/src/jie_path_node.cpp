@@ -36,6 +36,9 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   int preblocked_costmap_radius_cells;
   double preblocked_costmap_weight;
   bool lowest_traversable_only;
+  bool enable_path_shortcut, enable_path_smoothing, enable_continuous_yaw;
+  double path_interpolation_resolution, corner_fillet_radius;
+  int yaw_smoothing_window;
 
   pnh_.param<double>("robot_radius", robot_radius, 0.20);
   pnh_.param<int>("max_iterations", max_iterations, 250000);
@@ -51,6 +54,12 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   pnh_.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells, 3);
   pnh_.param<double>("preblocked_costmap_weight", preblocked_costmap_weight, 1.5);
   pnh_.param<bool>("lowest_traversable_only", lowest_traversable_only, false);
+  pnh_.param<bool>("enable_path_shortcut", enable_path_shortcut, true);
+  pnh_.param<bool>("enable_path_smoothing", enable_path_smoothing, true);
+  pnh_.param<double>("path_interpolation_resolution", path_interpolation_resolution, 0.05);
+  pnh_.param<double>("corner_fillet_radius", corner_fillet_radius, 0.30);
+  pnh_.param<bool>("enable_continuous_yaw", enable_continuous_yaw, true);
+  pnh_.param<int>("yaw_smoothing_window", yaw_smoothing_window, 5);
   pnh_.param<std::string>("map_id", map_id_, "navigation_map");
   pnh_.param<std::string>("source_world_file", source_world_file_, "");
 
@@ -73,7 +82,12 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   planner_.setPreblockedCostmapRadiusCells(preblocked_costmap_radius_cells);
   planner_.setPreblockedCostmapWeight(preblocked_costmap_weight);
   planner_.setLowestTraversableOnly(lowest_traversable_only);
-
+  planner_.setEnablePathShortcut(enable_path_shortcut);
+  planner_.setEnablePathSmoothing(enable_path_smoothing);
+  planner_.setPathInterpolationResolution(path_interpolation_resolution);
+  planner_.setCornerFilletRadius(corner_fillet_radius);
+  planner_.setEnableContinuousYaw(enable_continuous_yaw);
+  planner_.setYawSmoothingWindow(yaw_smoothing_window);
   // Map initialization with Priority Check & Fallback
   bool source_found = false;
 
@@ -239,19 +253,33 @@ bool JiePathNode::planAndPublish()
   }
 
   if (this_plan_seq == plan_seq_) {
-    publishPath(cells, frame_id_);
-    ROS_INFO("\033[1;32mA* path found. waypoints=%zu\033[0m", cells.size());
+    geometry_msgs::PoseStamped start_stamped;
+    start_stamped.header.frame_id = frame_id_;
+    start_stamped.pose.position = start_point_.point;
+    start_stamped.pose.orientation.w = 1.0;
+
+    geometry_msgs::PoseStamped goal_stamped;
+    goal_stamped.header.frame_id = frame_id_;
+    goal_stamped.pose.position = goal_point_.point;
+    goal_stamped.pose.orientation = has_goal_pose_ ? goal_pose_.pose.orientation : geometry_msgs::Quaternion();
+
+    std::vector<geometry_msgs::PoseStamped> smooth_plan = planner_.generateSmoothPath(
+      cells, start_stamped, goal_stamped, has_goal_pose_);
+
+    publishPath(smooth_plan, frame_id_);
+    ROS_INFO("\033[1;32mA* path found & smoothed. waypoints=%zu smooth_poses=%zu\033[0m",
+             cells.size(), smooth_plan.size());
     return true;
   }
   return false;
 }
 
-void JiePathNode::publishPath(const std::vector<octo_planner::GridIndex> & cells, const std::string & frame_id)
+void JiePathNode::publishPath(const std::vector<geometry_msgs::PoseStamped> & poses, const std::string & frame_id)
 {
   nav_msgs::Path path_msg;
   path_msg.header.stamp = now();
   path_msg.header.frame_id = frame_id;
-  path_msg.poses.reserve(cells.size());
+  path_msg.poses = poses;
 
   visualization_msgs::Marker m;
   m.header = path_msg.header;
@@ -263,21 +291,9 @@ void JiePathNode::publishPath(const std::vector<octo_planner::GridIndex> & cells
   m.color.r = 0.1F; m.color.g = 0.95F; m.color.b = 0.95F; m.color.a = 1.0F;
   m.pose.orientation.w = 1.0;
 
-  for (std::size_t i = 0; i < cells.size(); ++i) {
-    const auto p = planner_.gridToWorld(cells[i]);
-    geometry_msgs::PoseStamped pose;
-    pose.header = path_msg.header;
-    pose.pose.position.x = p.x();
-    pose.pose.position.y = p.y();
-    pose.pose.position.z = p.z();
-    pose.pose.orientation.w = 1.0;
-    if (has_goal_pose_ && i + 1 == cells.size())
-      pose.pose.orientation = goal_pose_.pose.orientation;
-    path_msg.poses.push_back(pose);
-
-    geometry_msgs::Point q;
-    q.x = p.x(); q.y = p.y(); q.z = p.z();
-    m.points.push_back(q);
+  m.points.reserve(poses.size());
+  for (const auto & pose : poses) {
+    m.points.push_back(pose.pose.position);
   }
 
   path_pub_.publish(path_msg);

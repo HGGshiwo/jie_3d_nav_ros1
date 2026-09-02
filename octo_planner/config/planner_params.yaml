@@ -11,3 +11,12 @@ enable_preblocked_costmap: true
 preblocked_costmap_radius_cells: 3
 preblocked_costmap_weight: 1.5
 lowest_traversable_only: false
+
+# Path shortcutting & smoothing optimization
+enable_path_shortcut: true
+enable_path_smoothing: true
+path_interpolation_resolution: 0.05
+corner_fillet_radius: 0.30
+enable_continuous_yaw: true
+yaw_smoothing_window: 5
+

@@ -18,7 +18,7 @@ find_package(catkin REQUIRED COMPONENTS
   costmap_2d
 )
 
-find_package(octomap REQUIRED)
+find_package(OCTOMAP REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP)
 if(OpenMP_FOUND)
