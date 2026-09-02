@@ -39,6 +39,28 @@ d1_controller:
     align_final_yaw: true
     linear_deadband: 0.05
     lateral_deadband: 0.05
-    angular_deadband: 0.05
     goal_position_tolerance: 0.1
     goal_yaw_tolerance: 0.2
+
+octo_planner:
+  ros__parameters:
+    robot_radius: 0.20
+    max_iterations: 250000
+    snap_search_radius_cells: 8
+    require_ground_support: true
+    strict_direct_ground_support: true
+    ground_support_xy_radius_cells: 1
+    ground_support_depth_cells: 2
+    max_step_height_cells: 1
+    robot_clearance_height_cells: 0
+    enable_preblocked_costmap: true
+    preblocked_costmap_radius_cells: 3
+    preblocked_costmap_weight: 1.5
+    lowest_traversable_only: false
+    # Path shortcutting & smoothing optimization
+    enable_path_shortcut: true
+    enable_path_smoothing: true
+    path_interpolation_resolution: 0.05
+    corner_fillet_radius: 0.30
+    enable_continuous_yaw: true
+    yaw_smoothing_window: 5

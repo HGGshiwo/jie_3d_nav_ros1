@@ -8,6 +8,12 @@ import threading
 from pathlib import Path
 
 import numpy as np
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for _attr, _type in [("bool", bool), ("int", int), ("float", float), ("complex", complex), ("object", object), ("str", str)]:
+        if not hasattr(np, _attr):
+            setattr(np, _attr, _type)
 import rospy
 from jie_map_msgs.srv import SaveNavigationMapPackage, SaveNavigationMapPackageRequest
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -31,7 +37,10 @@ from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+try:
+    from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+except ImportError:
+    from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import vtk
 from vtk.util import numpy_support
 

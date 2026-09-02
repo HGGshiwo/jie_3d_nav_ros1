@@ -10,6 +10,12 @@ import hashlib
 from pathlib import Path
 
 import numpy as np
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for _attr, _type in [("bool", bool), ("int", int), ("float", float), ("complex", complex), ("object", object), ("str", str)]:
+        if not hasattr(np, _attr):
+            setattr(np, _attr, _type)
 import open3d as o3d
 import rospy
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -37,7 +43,10 @@ from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+try:
+    from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+except ImportError:
+    from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import vtk
 from vtk.util import numpy_support
 
@@ -249,7 +258,14 @@ class PcdMapImportWindow(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._default_root = Path("~/catkin_3dnavi")
+        self._default_root = Path.home() / "catkin_ws" / "maps"
+        try:
+            import rospkg
+            rp = rospkg.RosPack()
+            pkg_path = Path(rp.get_path("jie_octomap"))
+            self._default_root = pkg_path / "maps"
+        except Exception:
+            pass
         self._selected_pcd: Path | None = None
         self._preview_points: np.ndarray | None = None
         self._source_cloud: o3d.geometry.PointCloud | None = None
@@ -292,13 +308,32 @@ class PcdMapImportWindow(QWidget):
         import_form = QFormLayout()
         pcd_row = QHBoxLayout()
         self.pcd_edit = QLineEdit()
-        self.pcd_edit.setPlaceholderText("选择 PCD 文件")
-        default_path = "/home/ubuntu/jie_3d_nav/src/jie_octomap/pcd/scene_downsampled.pcd"
+        self.pcd_edit.setPlaceholderText("选择或输入 PCD 文件路径")
+        default_path = ""
+        try:
+            import rospkg
+            rp = rospkg.RosPack()
+            pcd_dir = Path(rp.get_path("jie_octomap")) / "pcd"
+            pcds = sorted(list(pcd_dir.glob("*.pcd")))
+            if pcds:
+                default_path = str(pcds[0])
+        except Exception:
+            pass
+        if not default_path:
+            sample_pcd = Path("/home/user/catkin_ws/src/jie_3d_nav_ros1-main/jie_octomap/pcd/map-segment.pcd")
+            if sample_pcd.exists():
+                default_path = str(sample_pcd)
         self.pcd_edit.setText(default_path)
+        self.pcd_edit.returnPressed.connect(self._preview_pcd)
+
         pcd_btn = QPushButton("选择 PCD")
         pcd_btn.clicked.connect(self._choose_pcd)
+        load_pcd_btn = QPushButton("加载/预览")
+        load_pcd_btn.clicked.connect(self._preview_pcd)
+
         pcd_row.addWidget(self.pcd_edit, 1)
         pcd_row.addWidget(pcd_btn)
+        pcd_row.addWidget(load_pcd_btn)
         import_form.addRow("PCD 文件", pcd_row)
 
         ros_res = rospy.get_param("/pcd_to_octomap/resolution", 0.2)
@@ -648,9 +683,15 @@ class PcdMapImportWindow(QWidget):
         return xyz
 
     def _choose_pcd(self) -> None:
-        default_dir = Path("~/ros_ws").expanduser()
-        if not default_dir.is_dir():
-            default_dir = Path.home()
+        default_dir = Path.home()
+        try:
+            import rospkg
+            rp = rospkg.RosPack()
+            pkg_pcd = Path(rp.get_path("jie_octomap")) / "pcd"
+            if pkg_pcd.is_dir():
+                default_dir = pkg_pcd
+        except Exception:
+            pass
         selected, _ = QFileDialog.getOpenFileName(
             self, "选择 PCD 文件", str(default_dir), "Point Cloud Files (*.pcd)")
         if selected:
@@ -691,6 +732,9 @@ class PcdMapImportWindow(QWidget):
         if not pcd_path.exists():
             QMessageBox.warning(self, "PCD 地图导入", f"PCD 文件不存在：{pcd_path}")
             return
+        self._selected_pcd = pcd_path
+        if hasattr(self, "name_edit") and not self.name_edit.text().strip():
+            self.name_edit.setText(pcd_path.stem)
         try:
             point_cloud = o3d.io.read_point_cloud(str(pcd_path))
         except Exception as exc:

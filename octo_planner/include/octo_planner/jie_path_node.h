@@ -27,8 +27,6 @@
 #include "jie_map_msgs/GetNavigationMapMeta.h"
 #include "jie_map_msgs/QueryCellDebugInfo.h"
 
-#include <nav_msgs/OccupancyGrid.h>
-
 class JiePathNode
 {
 public:
@@ -44,7 +42,7 @@ private:
   void publishCurrentOctomap();
   void tryPlan();
   bool planAndPublish();
-  void publishPath(const std::vector<octo_planner::GridIndex> & cells, const std::string & frame_id);
+  void publishPath(const std::vector<geometry_msgs::PoseStamped> & poses, const std::string & frame_id);
   void publishCellSetMarker(
     const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
     ros::Publisher & publisher,
@@ -55,7 +53,6 @@ private:
 
   // ---- subscribers ----
   void onOctomap(const octomap_msgs::Octomap::ConstPtr & msg);
-  void onOccupancyGrid(const nav_msgs::OccupancyGrid::ConstPtr & msg);
   void onEditedOccupiedMarker(const visualization_msgs::Marker::ConstPtr & msg);
   void onStart(const geometry_msgs::PointStamped::ConstPtr & msg);
   void onGoal(const geometry_msgs::PointStamped::ConstPtr & msg);
@@ -74,18 +71,12 @@ private:
     jie_map_msgs::QueryCellDebugInfo::Response & res);
 
   // ---- parameters ----
-  std::string local_map_path_, map_topic_, octomap_topic_, start_topic_, goal_topic_, goal_pose_topic_;
+  std::string octomap_topic_, start_topic_, goal_topic_, goal_pose_topic_;
   std::string path_topic_, path_marker_topic_, preblocked_marker_topic_;
   std::string external_preblocked_marker_topic_, edited_occupied_marker_topic_;
   std::string traversable_marker_topic_, risk_cost_topic_;
   std::string frame_id_, map_id_, source_world_file_;
   bool enable_preblocked_costmap_;
-  
-  // OccupancyGrid conversion parameters
-  double octomap_resolution_;
-  double wall_height_m_;
-  double floor_z_m_;
-  int occupied_threshold_;
 
   // ---- state ----
   bool map_ready_, has_start_, has_goal_, has_goal_pose_, planning_in_progress_;
@@ -98,7 +89,7 @@ private:
   // ---- ros handles ----
   ros::NodeHandle & nh_;
   ros::NodeHandle & pnh_;
-  ros::Subscriber octomap_sub_, map_sub_, start_sub_, goal_sub_, goal_pose_sub_;
+  ros::Subscriber octomap_sub_, start_sub_, goal_sub_, goal_pose_sub_;
   ros::Subscriber external_preblocked_sub_, edited_occupied_sub_;
   ros::Publisher path_pub_, path_marker_pub_, octomap_pub_;
   ros::Publisher preblocked_marker_pub_, traversable_marker_pub_, risk_cost_pub_;
