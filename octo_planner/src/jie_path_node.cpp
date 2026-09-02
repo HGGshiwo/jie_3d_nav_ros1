@@ -12,6 +12,8 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   last_octomap_hash_(0)
 {
   // Parameters
+  pnh_.param<std::string>("local_map_path", local_map_path_, "");
+  pnh_.param<std::string>("map_topic", map_topic_, "");
   pnh_.param<std::string>("octomap_topic", octomap_topic_, "/octomap");
   pnh_.param<std::string>("start_topic", start_topic_, "/start_point");
   pnh_.param<std::string>("goal_topic", goal_topic_, "/goal_point");
@@ -61,6 +63,11 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   pnh_.param<std::string>("map_id", map_id_, "navigation_map");
   pnh_.param<std::string>("source_world_file", source_world_file_, "");
 
+  pnh_.param<double>("octomap_resolution", octomap_resolution_, 0.2);
+  pnh_.param<double>("wall_height_m", wall_height_m_, 1.0);
+  pnh_.param<double>("floor_z_m", floor_z_m_, 0.0);
+  pnh_.param<int>("occupied_threshold", occupied_threshold_, 50);
+
   // Set parameters on the core planner
   planner_.setRobotRadius(robot_radius);
   planner_.setMaxIterations(max_iterations);
@@ -81,9 +88,59 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   planner_.setCornerFilletRadius(corner_fillet_radius);
   planner_.setEnableContinuousYaw(enable_continuous_yaw);
   planner_.setYawSmoothingWindow(yaw_smoothing_window);
+  // Map initialization with Priority Check & Fallback
+  bool source_found = false;
+
+  // Priority 1: Local Map File
+  if (!local_map_path_.empty()) {
+    ROS_INFO("Attempting to load local map file: %s", local_map_path_.c_str());
+    std::shared_ptr<octomap::OcTree> octree;
+    if (local_map_path_.length() > 3 && local_map_path_.substr(local_map_path_.length() - 3) == ".bt") {
+      octree = std::make_shared<octomap::OcTree>(octomap_resolution_);
+      if (octree->readBinary(local_map_path_)) {
+        source_found = true;
+      }
+    } else {
+      octomap::AbstractOcTree* abstract_tree = octomap::AbstractOcTree::read(local_map_path_);
+      if (abstract_tree) {
+        octree = std::shared_ptr<octomap::OcTree>(dynamic_cast<octomap::OcTree*>(abstract_tree));
+        if (octree) {
+          source_found = true;
+        } else {
+          delete abstract_tree;
+        }
+      }
+    }
+
+    if (source_found) {
+      planner_.setOctree(octree);
+      map_ready_ = true;
+      planner_.rebuildAllLayers();
+      ROS_INFO("Active map source in use: Local Map File [%s]", local_map_path_.c_str());
+    } else {
+      ROS_ERROR("Failed to load local map file '%s'. Downgrading to next priority...", local_map_path_.c_str());
+    }
+  }
+
+  // Priority 2: Map Topic (OccupancyGrid)
+  if (!source_found && !map_topic_.empty()) {
+    map_sub_ = nh_.subscribe(map_topic_, 1, &JiePathNode::onOccupancyGrid, this);
+    ROS_INFO("Map source configured: Map Topic [%s]", map_topic_.c_str());
+    source_found = true;
+  }
+
+  // Priority 3: Octomap Topic (Octomap)
+  if (!source_found && !octomap_topic_.empty()) {
+    octomap_sub_ = nh_.subscribe(octomap_topic_, 1, &JiePathNode::onOctomap, this);
+    ROS_INFO("Map source configured: Octomap Topic [%s]", octomap_topic_.c_str());
+    source_found = true;
+  }
+
+  if (!source_found) {
+    ROS_ERROR("No map source configured! Please set local_map_path, map_topic, or octomap_topic.");
+  }
 
   // Subscribers
-  octomap_sub_ = nh_.subscribe(octomap_topic_, 1, &JiePathNode::onOctomap, this);
   start_sub_   = nh_.subscribe(start_topic_, 1, &JiePathNode::onStart, this);
   goal_sub_    = nh_.subscribe(goal_topic_, 1, &JiePathNode::onGoal, this);
   goal_pose_sub_ = nh_.subscribe(goal_pose_topic_, 1, &JiePathNode::onGoalPose, this);
@@ -106,9 +163,9 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   query_cell_debug_srv_ = pnh_.advertiseService("query_cell_debug_info", &JiePathNode::handleQueryCellDebugInfo, this);
 
   ROS_INFO(
-    "jie_path_node started. octomap=%s start=%s goal=%s path=%s "
+    "jie_path_node started. local_map_path=%s map_topic=%s octomap=%s start=%s goal=%s path=%s "
     "preblocked_marker=%s edited_occupied=%s meta_service=~/get_meta export_service=~/export_snapshot query_debug_service=~/query_cell_debug_info",
-    octomap_topic_.c_str(), start_topic_.c_str(), goal_topic_.c_str(), path_topic_.c_str(),
+    local_map_path_.c_str(), map_topic_.c_str(), octomap_topic_.c_str(), start_topic_.c_str(), goal_topic_.c_str(), path_topic_.c_str(),
     preblocked_marker_topic_.c_str(), edited_occupied_marker_topic_.c_str());
 }
 
@@ -230,7 +287,7 @@ void JiePathNode::publishPath(const std::vector<geometry_msgs::PoseStamped> & po
   m.id = 0;
   m.type = visualization_msgs::Marker::LINE_STRIP;
   m.action = visualization_msgs::Marker::ADD;
-  m.scale.x = 0.16;
+  m.scale.x = 0.32;
   m.color.r = 0.1F; m.color.g = 0.95F; m.color.b = 0.95F; m.color.a = 1.0F;
   m.pose.orientation.w = 1.0;
 

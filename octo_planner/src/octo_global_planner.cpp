@@ -2,10 +2,17 @@
 #include <nav_core/base_global_planner.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Path.h>
+#include <nav_msgs/OccupancyGrid.h>
 #include <costmap_2d/costmap_2d_ros.h>
 #include <octomap_msgs/conversions.h>
 #include <octomap_msgs/Octomap.h>
 #include <pluginlib/class_list_macros.h>
+#include <std_msgs/String.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <visualization_msgs/Marker.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 
 #include "octo_planner/octo_planner_core.h"
 
@@ -17,7 +24,10 @@ class OctoGlobalPlanner : public nav_core::BaseGlobalPlanner
 public:
   OctoGlobalPlanner()
   : initialized_(false),
-    map_ready_(false)
+    map_ready_(false),
+    map_changed_(true),
+    last_map_import_time_(0),
+    octomap_resolution_(0.2)
   {
   }
 
@@ -33,8 +43,12 @@ public:
 
     ros::NodeHandle private_nh("~/" + name);
     
-    std::string octomap_topic;
-    private_nh.param<std::string>("octomap_topic", octomap_topic, "/octomap");
+    private_nh.param<std::string>("octomap_topic", octomap_topic_, "/octomap_global");
+    if (octomap_topic_.empty()) {
+      octomap_topic_ = "/octomap_global";
+    }
+    
+    private_nh.param<double>("octomap_resolution", octomap_resolution_, 0.2);
     
     double robot_radius;
     int max_iterations, snap_search_radius_cells;
@@ -90,16 +104,23 @@ public:
     planner_.setEnableContinuousYaw(enable_continuous_yaw);
     planner_.setYawSmoothingWindow(yaw_smoothing_window);
 
-    // Subscribe to Octomap
+    // Subscribe to standard octomap topic
     ros::NodeHandle nh;
-    octomap_sub_ = nh.subscribe(octomap_topic, 1, &OctoGlobalPlanner::onOctomap, this);
+    octomap_sub_ = nh.subscribe(octomap_topic_, 1, &OctoGlobalPlanner::onOctomap, this);
+    ROS_INFO("OctoGlobalPlanner: Pure topic mode active. Listening to OctoMap Topic [%s]", octomap_topic_.c_str());
 
     // Advertise the full global plan topic globally under move_base namespace (~plan resolves to /move_base/plan)
     ros::NodeHandle move_base_nh("~");
     plan_pub_ = move_base_nh.advertise<nav_msgs::Path>("plan", 1, true);
+    traversable_marker_pub_ = move_base_nh.advertise<visualization_msgs::Marker>("traversable_cells", 1, true);
+    preblocked_marker_pub_ = move_base_nh.advertise<visualization_msgs::Marker>("preblocked_cells", 1, true);
+    risk_cost_pub_ = move_base_nh.advertise<sensor_msgs::PointCloud2>("risk_cost_cloud", 1, true);
+
+    // Initialize status publisher
+    status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
 
     initialized_ = true;
-    ROS_INFO("OctoGlobalPlanner initialized successfully. Subscribed to octomap on: %s", octomap_topic.c_str());
+    ROS_INFO("OctoGlobalPlanner initialized successfully. Waiting for map message on %s...", octomap_topic_.c_str());
   }
 
   virtual bool makePlan(const geometry_msgs::PoseStamped& start,
@@ -114,36 +135,117 @@ public:
 
     if (!map_ready_)
     {
-      ROS_WARN_THROTTLE(2.0, "OctoGlobalPlanner cannot plan because Octomap is not ready.");
-      return false;
+      ROS_WARN_THROTTLE(2.0, "OctoGlobalPlanner: Octomap is not ready! Degrading to straight-line planning.");
+      publishStatus("Global planner: Degraded to straight-line planning.");
+      
+      double dx = goal.pose.position.x - start.pose.position.x;
+      double dy = goal.pose.position.y - start.pose.position.y;
+      double dz = goal.pose.position.z - start.pose.position.z;
+      double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+      
+      plan.clear();
+      plan.push_back(start);
+      
+      if (dist > 1e-3) {
+        double step = (octomap_resolution_ > 0.0) ? octomap_resolution_ : 0.1;
+        int num_steps = static_cast<int>(std::floor(dist / step));
+        for (int i = 1; i < num_steps; ++i) {
+          double ratio = static_cast<double>(i) / num_steps;
+          geometry_msgs::PoseStamped p = start;
+          p.pose.position.x = start.pose.position.x + ratio * dx;
+          p.pose.position.y = start.pose.position.y + ratio * dy;
+          p.pose.position.z = start.pose.position.z + ratio * dz;
+          
+          tf2::Quaternion q_start, q_goal;
+          tf2::fromMsg(start.pose.orientation, q_start);
+          tf2::fromMsg(goal.pose.orientation, q_goal);
+          tf2::Quaternion q_interp = q_start.slerp(q_goal, ratio);
+          p.pose.orientation = tf2::toMsg(q_interp);
+          
+          plan.push_back(p);
+        }
+      }
+      
+      plan.push_back(goal);
+      
+      nav_msgs::Path path_msg;
+      path_msg.header.stamp = ros::Time::now();
+      path_msg.header.frame_id = start.header.frame_id;
+      path_msg.poses = plan;
+      
+      plan_pub_.publish(path_msg);
+      return true;
+    }
+
+    ros::Time t_start = ros::Time::now();
+    double rebuild_ms = 0.0;
+
+    if (map_changed_)
+    {
+      ROS_INFO("OctoGlobalPlanner: Map updated. Rebuilding layers before planning...");
+      ros::Time t_reb = ros::Time::now();
+      planner_.rebuildAllLayers();
+      rebuild_ms = (ros::Time::now() - t_reb).toSec() * 1000.0;
+      map_changed_ = false;
+
+      // Publish A* planner internal cost/traversability representation to RViz
+      publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", start.header.frame_id, 0.20F, 0.95F, 0.55F, 0.55F);
+      publishCellSetMarker(planner_.getPreblockedCells(), preblocked_marker_pub_, "preblocked_cells", start.header.frame_id, 0.15F, 0.35F, 1.0F, 0.95F);
+      publishRiskCostCloud(start.header.frame_id);
     }
 
     std::vector<GridIndex> cells;
     std::string error_msg;
+    ros::Time t_search = ros::Time::now();
     bool ok = planner_.plan(start.pose.position, goal.pose.position, cells, error_msg);
+    double search_ms = (ros::Time::now() - t_search).toSec() * 1000.0;
+    double total_ms = (ros::Time::now() - t_start).toSec() * 1000.0;
+
+    char status_buf[512];
     if (!ok)
     {
-      ROS_WARN_THROTTLE(2.0, "OctoGlobalPlanner failed to find a plan: %s", error_msg.c_str());
+      snprintf(status_buf, sizeof(status_buf),
+               "[GlobalPlanner FAIL] Rebuild: %.1fms | Search: %.1fms | Total: %.1fms | Err: %s",
+               rebuild_ms, search_ms, total_ms, error_msg.c_str());
+      publishStatus(status_buf);
+      ROS_WARN_THROTTLE(1.0, "%s", status_buf);
       return false;
     }
 
+    ros::Time plan_time = ros::Time::now();
     // Generate smooth, interpolated path with continuous yaw
     plan = planner_.generateSmoothPath(cells, start, goal, true);
 
     // Manually publish the full plan
     nav_msgs::Path path_msg;
-    path_msg.header.stamp = ros::Time::now();
+    path_msg.header.stamp = plan_time;
     path_msg.header.frame_id = start.header.frame_id;
     path_msg.poses = plan;
     plan_pub_.publish(path_msg);
 
-    ROS_INFO_THROTTLE(1.0, "OctoGlobalPlanner: Smooth path generated with %zu points (raw waypoints: %zu). Published to /move_base/plan", plan.size(), cells.size());
+    snprintf(status_buf, sizeof(status_buf),
+             "[GlobalPlanner OK] Rebuild: %.1fms | Search: %.1fms | Total: %.1fms | Pts: %zu",
+             rebuild_ms, search_ms, total_ms, plan.size());
+    publishStatus(status_buf);
+    ROS_INFO_THROTTLE(1.0, "%s", status_buf);
     return true;
   }
 
-private:
   void onOctomap(const octomap_msgs::Octomap::ConstPtr & msg)
   {
+    static bool printed = false;
+    if (!printed) {
+      ROS_INFO("OctoGlobalPlanner: Active map source in use: Octomap Topic [%s]", octomap_topic_.c_str());
+      printed = true;
+    }
+
+    // Throttling: Max 2Hz for processing
+    ros::Time now = ros::Time::now();
+    if ((now - last_map_import_time_).toSec() < 0.5) {
+      return;
+    }
+    last_map_import_time_ = now;
+
     std::shared_ptr<octomap::OcTree> octree(dynamic_cast<octomap::OcTree *>(octomap_msgs::msgToMap(*msg)));
     if (!octree)
     {
@@ -151,14 +253,121 @@ private:
       return;
     }
     planner_.setOctree(octree);
-    planner_.rebuildAllLayers();
     map_ready_ = true;
+
+    // 收到地图后立刻预构建所有 3D 图层并推送到 ROS 话题与网页状态栏
+    char status_start_buf[256];
+    snprintf(status_start_buf, sizeof(status_start_buf),
+             "[GlobalPlanner STATUS] Map received. Pre-building 3D layers...");
+    publishStatus(status_start_buf);
+    ROS_INFO("%s", status_start_buf);
+
+    ros::Time t_reb = ros::Time::now();
+    planner_.rebuildAllLayers();
+    double reb_ms = (ros::Time::now() - t_reb).toSec() * 1000.0;
+    map_changed_ = false;
+
+    // 主动向 Web 界面及 RViz 推送真实图层 Marker
+    std::string frame_id = msg->header.frame_id.empty() ? "map" : msg->header.frame_id;
+    publishCellSetMarker(planner_.getTraversableCells(), traversable_marker_pub_, "traversable_cells", frame_id, 0.20F, 0.95F, 0.55F, 0.55F);
+    publishCellSetMarker(planner_.getPreblockedCells(), preblocked_marker_pub_, "preblocked_cells", frame_id, 0.15F, 0.35F, 1.0F, 0.95F);
+    publishRiskCostCloud(frame_id);
+
+    char status_done_buf[256];
+    snprintf(status_done_buf, sizeof(status_done_buf),
+             "[GlobalPlanner READY] Pre-build finished in %.1fms | Trav: %zu | Preblocked: %zu",
+             reb_ms, planner_.getTraversableCells().size(), planner_.getPreblockedCells().size());
+    publishStatus(status_done_buf);
+    ROS_INFO("%s", status_done_buf);
+  }
+
+  void publishCellSetMarker(
+    const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
+    ros::Publisher & publisher,
+    const std::string & ns,
+    const std::string & frame_id,
+    float r_color, float g_color, float b_color, float a_color) const
+  {
+    auto octree = planner_.getOctree();
+    if (!octree) return;
+    visualization_msgs::Marker marker;
+    marker.header.stamp = ros::Time::now();
+    marker.header.frame_id = frame_id;
+    marker.ns = ns;
+    marker.id = 0;
+    marker.type = visualization_msgs::Marker::CUBE_LIST;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    const double resolution = octree->getResolution();
+    marker.scale.x = resolution;
+    marker.scale.y = resolution;
+    marker.scale.z = resolution;
+    marker.color.r = r_color;
+    marker.color.g = g_color;
+    marker.color.b = b_color;
+    marker.color.a = a_color;
+    marker.points.reserve(cells.size());
+    for (const auto & c : cells) {
+      const auto p = planner_.gridToWorld(c);
+      geometry_msgs::Point q;
+      q.x = p.x(); q.y = p.y(); q.z = p.z();
+      marker.points.push_back(q);
+    }
+    publisher.publish(marker);
+  }
+
+  void publishRiskCostCloud(const std::string & frame_id) const
+  {
+    const auto costmap = planner_.getPreblockedCostmap();
+    sensor_msgs::PointCloud2 cloud_msg;
+    cloud_msg.header.stamp = ros::Time::now();
+    cloud_msg.header.frame_id = frame_id;
+
+    sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+    modifier.setPointCloud2Fields(4,
+      "x", 1, sensor_msgs::PointField::FLOAT32,
+      "y", 1, sensor_msgs::PointField::FLOAT32,
+      "z", 1, sensor_msgs::PointField::FLOAT32,
+      "intensity", 1, sensor_msgs::PointField::FLOAT32);
+    modifier.resize(costmap.size());
+
+    sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+    sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+    sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+    sensor_msgs::PointCloud2Iterator<float> iter_i(cloud_msg, "intensity");
+
+    for (const auto & entry : costmap) {
+      const auto p = planner_.gridToWorld(entry.first);
+      *iter_x = p.x(); *iter_y = p.y(); *iter_z = p.z();
+      *iter_i = static_cast<float>(entry.second);
+      ++iter_x; ++iter_y; ++iter_z; ++iter_i;
+    }
+    risk_cost_pub_.publish(cloud_msg);
+  }
+
+  void publishStatus(const std::string& status)
+  {
+    last_status_ = status;
+    std_msgs::String msg;
+    msg.data = status;
+    status_pub_.publish(msg);
   }
 
   bool initialized_;
   bool map_ready_;
+  bool map_changed_;
+  ros::Time last_map_import_time_;
+
+  std::string octomap_topic_;
+  double octomap_resolution_;
+
   ros::Subscriber octomap_sub_;
   ros::Publisher plan_pub_;
+  ros::Publisher status_pub_;
+  ros::Publisher traversable_marker_pub_;
+  ros::Publisher preblocked_marker_pub_;
+  ros::Publisher risk_cost_pub_;
+  std::string last_status_;
   OctoPlannerCore planner_;
 };
 

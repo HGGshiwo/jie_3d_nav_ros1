@@ -20,6 +20,11 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(OCTOMAP REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(OpenMP)
+if(OpenMP_FOUND)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+endif()
 
 catkin_package(
   INCLUDE_DIRS include
@@ -42,7 +47,7 @@ catkin_package(
 )
 
 include_directories(
-  ${PROJECT_SOURCE_DIR}/include
+  include
   ${catkin_INCLUDE_DIRS}
   ${OCTOMAP_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
@@ -94,6 +99,16 @@ target_link_libraries(d1_local_planner_plugin
 )
 add_dependencies(d1_local_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
+# ---- octo_local_planner_plugin ----
+add_library(octo_local_planner_plugin src/octo_local_planner.cpp)
+target_link_libraries(octo_local_planner_plugin
+  octo_planner_core
+  ${catkin_LIBRARIES}
+  ${OCTOMAP_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+add_dependencies(octo_local_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
 # ---- test_map_to_odom_tf_node ----
 add_executable(test_map_to_odom_tf_node src/test_map_to_odom_tf_node.cpp)
 target_link_libraries(test_map_to_odom_tf_node ${catkin_LIBRARIES})
@@ -103,6 +118,7 @@ install(TARGETS
   octo_planner_core
   octo_global_planner_plugin
   d1_local_planner_plugin
+  octo_local_planner_plugin
   jie_path_node
   d1_controller
   test_map_to_odom_tf_node
