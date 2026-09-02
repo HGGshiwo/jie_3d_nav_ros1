@@ -49,3 +49,4 @@ d1_controller:
     angular_deadband: 0.05
     goal_position_tolerance: 0.1
     goal_yaw_tolerance: 0.2
+

@@ -46,6 +46,6 @@ d1_controller:
     align_final_yaw: true
     linear_deadband: 0.05
     lateral_deadband: 0.05
-    angular_deadband: 0.05
     goal_position_tolerance: 0.1
     goal_yaw_tolerance: 0.2
+

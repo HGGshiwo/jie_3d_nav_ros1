@@ -44,7 +44,7 @@ private:
   void publishCurrentOctomap();
   void tryPlan();
   bool planAndPublish();
-  void publishPath(const std::vector<octo_planner::GridIndex> & cells, const std::string & frame_id);
+  void publishPath(const std::vector<geometry_msgs::PoseStamped> & poses, const std::string & frame_id);
   void publishCellSetMarker(
     const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
     ros::Publisher & publisher,

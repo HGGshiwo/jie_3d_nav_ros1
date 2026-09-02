@@ -100,6 +100,18 @@ public:
   void setPreblockedCostmapRadiusCells(int val) { preblocked_costmap_radius_cells_ = val; }
   void setPreblockedCostmapWeight(double val) { preblocked_costmap_weight_ = val; }
   void setLowestTraversableOnly(bool val) { lowest_traversable_only_ = val; }
+  void setEnablePathShortcut(bool val) { enable_path_shortcut_ = val; }
+  bool getEnablePathShortcut() const { return enable_path_shortcut_; }
+  void setEnablePathSmoothing(bool val) { enable_path_smoothing_ = val; }
+  bool getEnablePathSmoothing() const { return enable_path_smoothing_; }
+  void setPathInterpolationResolution(double val) { path_interpolation_resolution_ = val; }
+  double getPathInterpolationResolution() const { return path_interpolation_resolution_; }
+  void setCornerFilletRadius(double val) { corner_fillet_radius_ = val; }
+  double getCornerFilletRadius() const { return corner_fillet_radius_; }
+  void setEnableContinuousYaw(bool val) { enable_continuous_yaw_ = val; }
+  bool getEnableContinuousYaw() const { return enable_continuous_yaw_; }
+  void setYawSmoothingWindow(int val) { yaw_smoothing_window_ = val; }
+  int getYawSmoothingWindow() const { return yaw_smoothing_window_; }
 
   // Octomap management
   bool setOctree(const std::shared_ptr<octomap::OcTree>& octree);
@@ -149,6 +161,16 @@ public:
             std::vector<GridIndex>& path_cells,
             std::string & error_msg);
 
+  // Path optimization and post-processing
+  bool isLineTraversable(const GridIndex & from, const GridIndex & to) const;
+  bool isLineTraversable(const octomap::point3d & from, const octomap::point3d & to) const;
+  std::vector<GridIndex> shortcutPath(const std::vector<GridIndex> & raw_path) const;
+  std::vector<geometry_msgs::PoseStamped> generateSmoothPath(
+    const std::vector<GridIndex> & cells,
+    const geometry_msgs::PoseStamped & start_pose,
+    const geometry_msgs::PoseStamped & goal_pose,
+    bool has_goal_pose = false) const;
+
   bool isInsideMetricBounds(const GridIndex & idx) const;
   bool isOccupiedCell(const GridIndex & idx) const;
   bool isCellTraversable(const GridIndex & idx, double robot_radius,
@@ -159,6 +181,7 @@ public:
 
 private:
   double euclidean(const GridIndex & a, const GridIndex & b) const;
+  bool isDiagonalTransitionValid(const GridIndex & from, const GridIndex & to) const;
   bool hasGroundSupport(const GridIndex & idx, bool strict, int xy_r, int depth) const;
   bool hasNonOccupiedNeighborSameLevel(const GridIndex & idx) const;
   bool hasSameLevelNeighborWithOccupiedBelow(const GridIndex & idx) const;
@@ -181,6 +204,12 @@ private:
   int preblocked_costmap_radius_cells_;
   double preblocked_costmap_weight_;
   bool lowest_traversable_only_;
+  bool enable_path_shortcut_;
+  bool enable_path_smoothing_;
+  double path_interpolation_resolution_;
+  double corner_fillet_radius_;
+  bool enable_continuous_yaw_;
+  int yaw_smoothing_window_;
 
   // State
   std::shared_ptr<octomap::OcTree> octree_;

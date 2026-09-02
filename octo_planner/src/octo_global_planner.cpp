@@ -27,7 +27,7 @@ public:
     map_ready_(false),
     map_changed_(true),
     last_map_import_time_(0),
-    last_grid_hash_(0)
+    octomap_resolution_(0.2)
   {
   }
 
@@ -48,6 +48,8 @@ public:
       octomap_topic_ = "/octomap_global";
     }
     
+    private_nh.param<double>("octomap_resolution", octomap_resolution_, 0.2);
+    
     double robot_radius;
     int max_iterations, snap_search_radius_cells;
     bool require_ground_support, strict_direct_ground_support;
@@ -57,6 +59,9 @@ public:
     int preblocked_costmap_radius_cells;
     double preblocked_costmap_weight;
     bool lowest_traversable_only;
+    bool enable_path_shortcut, enable_path_smoothing, enable_continuous_yaw;
+    double path_interpolation_resolution, corner_fillet_radius;
+    int yaw_smoothing_window;
 
     private_nh.param<double>("robot_radius", robot_radius, 0.20);
     private_nh.param<int>("max_iterations", max_iterations, 250000);
@@ -71,6 +76,12 @@ public:
     private_nh.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells, 3);
     private_nh.param<double>("preblocked_costmap_weight", preblocked_costmap_weight, 1.5);
     private_nh.param<bool>("lowest_traversable_only", lowest_traversable_only, false);
+    private_nh.param<bool>("enable_path_shortcut", enable_path_shortcut, true);
+    private_nh.param<bool>("enable_path_smoothing", enable_path_smoothing, true);
+    private_nh.param<double>("path_interpolation_resolution", path_interpolation_resolution, 0.05);
+    private_nh.param<double>("corner_fillet_radius", corner_fillet_radius, 0.30);
+    private_nh.param<bool>("enable_continuous_yaw", enable_continuous_yaw, true);
+    private_nh.param<int>("yaw_smoothing_window", yaw_smoothing_window, 5);
 
     planner_.setRobotRadius(robot_radius);
     planner_.setMaxIterations(max_iterations);
@@ -86,6 +97,12 @@ public:
     planner_.setPreblockedCostmapRadiusCells(preblocked_costmap_radius_cells);
     planner_.setPreblockedCostmapWeight(preblocked_costmap_weight);
     planner_.setLowestTraversableOnly(lowest_traversable_only);
+    planner_.setEnablePathShortcut(enable_path_shortcut);
+    planner_.setEnablePathSmoothing(enable_path_smoothing);
+    planner_.setPathInterpolationResolution(path_interpolation_resolution);
+    planner_.setCornerFilletRadius(corner_fillet_radius);
+    planner_.setEnableContinuousYaw(enable_continuous_yaw);
+    planner_.setYawSmoothingWindow(yaw_smoothing_window);
 
     // Subscribe to standard octomap topic
     ros::NodeHandle nh;
@@ -195,33 +212,9 @@ public:
       return false;
     }
 
-    plan.clear();
-    plan.reserve(cells.size());
     ros::Time plan_time = ros::Time::now();
-
-    for (size_t i = 0; i < cells.size(); ++i)
-    {
-      const auto p = planner_.gridToWorld(cells[i]);
-      geometry_msgs::PoseStamped pose;
-      pose.header.stamp = plan_time;
-      pose.header.frame_id = start.header.frame_id;
-      pose.pose.position.x = p.x();
-      pose.pose.position.y = p.y();
-      pose.pose.position.z = p.z();
-      pose.pose.orientation.w = 1.0;
-      
-      // Preserve original orientation at the start/goal if applicable
-      if (i == 0)
-      {
-        pose.pose.orientation = start.pose.orientation;
-      }
-      else if (i + 1 == cells.size())
-      {
-        pose.pose.orientation = goal.pose.orientation;
-      }
-      
-      plan.push_back(pose);
-    }
+    // Generate smooth, interpolated path with continuous yaw
+    plan = planner_.generateSmoothPath(cells, start, goal, true);
 
     // Manually publish the full plan
     nav_msgs::Path path_msg;
@@ -236,16 +229,6 @@ public:
     publishStatus(status_buf);
     ROS_INFO_THROTTLE(1.0, "%s", status_buf);
     return true;
-  }
-
-  uint64_t hashGridData(const std::vector<int8_t> & data) const
-  {
-    std::uint64_t h = 1469598103934665603ULL;
-    for (const auto v : data) {
-      h ^= static_cast<std::uint8_t>(v);
-      h *= 1099511628211ULL;
-    }
-    return h;
   }
 
   void onOctomap(const octomap_msgs::Octomap::ConstPtr & msg)
@@ -296,93 +279,6 @@ public:
              reb_ms, planner_.getTraversableCells().size(), planner_.getPreblockedCells().size());
     publishStatus(status_done_buf);
     ROS_INFO("%s", status_done_buf);
-  }
-
-  void onOccupancyGrid(const nav_msgs::OccupancyGrid::ConstPtr & msg)
-  {
-    static bool printed = false;
-    if (!printed) {
-      ROS_INFO("OctoGlobalPlanner: Active map source in use: Map Topic [%s]", map_topic_.c_str());
-      printed = true;
-    }
-
-    // 1. Data Hash Check
-    uint64_t hash = hashGridData(msg->data);
-    if (map_ready_ && hash == last_grid_hash_) {
-      return; // Skip identical map data
-    }
-
-    // 2. Throttling
-    ros::Time now = ros::Time::now();
-    if ((now - last_map_import_time_).toSec() < 0.5) {
-      return;
-    }
-    last_map_import_time_ = now;
-
-    const double grid_resolution = msg->info.resolution;
-    if (grid_resolution <= 0.0 || octomap_resolution_ <= 0.0) {
-      ROS_ERROR("OctoGlobalPlanner: Grid and OctoMap resolutions must be positive.");
-      return;
-    }
-
-    struct XYKey {
-      int x;
-      int y;
-      bool operator==(const XYKey & o) const { return x == o.x && y == o.y; }
-    };
-    struct XYKeyHash {
-      std::size_t operator()(const XYKey & k) const {
-        return std::hash<int>{}(k.x) ^ (std::hash<int>{}(k.y) << 1);
-      }
-    };
-
-    std::shared_ptr<octomap::OcTree> octree = std::make_shared<octomap::OcTree>(octomap_resolution_);
-    const double wall_height = std::max(octomap_resolution_, wall_height_m_);
-    const int height_cells = std::max(1, static_cast<int>(std::ceil(wall_height / octomap_resolution_)));
-
-    const auto & origin = msg->info.origin.position;
-    const std::size_t width = msg->info.width;
-    const std::size_t height = msg->info.height;
-
-    std::unordered_set<XYKey, XYKeyHash> known_cells;
-    std::unordered_set<XYKey, XYKeyHash> occupied_cells;
-
-    for (std::size_t y = 0; y < height; ++y) {
-      for (std::size_t x = 0; x < width; ++x) {
-        const std::size_t index = y * width + x;
-        if (index >= msg->data.size()) continue;
-        const int8_t value = msg->data[index];
-        if (value < 0) continue;
-
-        const double world_x = origin.x + (static_cast<double>(x) + 0.5) * grid_resolution;
-        const double world_y = origin.y + (static_cast<double>(y) + 0.5) * grid_resolution;
-        const int grid_x = static_cast<int>(std::floor(world_x / octomap_resolution_));
-        const int grid_y = static_cast<int>(std::floor(world_y / octomap_resolution_));
-        const XYKey key{grid_x, grid_y};
-        known_cells.insert(key);
-        if (value >= occupied_threshold_) occupied_cells.insert(key);
-      }
-    }
-
-    for (const auto & key : known_cells) {
-      const double wx = (static_cast<double>(key.x) + 0.5) * octomap_resolution_;
-      const double wy = (static_cast<double>(key.y) + 0.5) * octomap_resolution_;
-      octree->updateNode(wx, wy, floor_z_m_ + 0.5 * octomap_resolution_, true);
-    }
-    for (const auto & key : occupied_cells) {
-      const double wx = (static_cast<double>(key.x) + 0.5) * octomap_resolution_;
-      const double wy = (static_cast<double>(key.y) + 0.5) * octomap_resolution_;
-      for (int z = 1; z <= height_cells; ++z) {
-        const double wz = floor_z_m_ + (static_cast<double>(z) + 0.5) * octomap_resolution_;
-        octree->updateNode(wx, wy, wz, true);
-      }
-    }
-    octree->updateInnerOccupancy();
-
-    planner_.setOctree(octree);
-    last_grid_hash_ = hash;
-    map_ready_ = true;
-    map_changed_ = true;
   }
 
   void publishCellSetMarker(
@@ -461,18 +357,11 @@ public:
   bool map_ready_;
   bool map_changed_;
   ros::Time last_map_import_time_;
-  uint64_t last_grid_hash_;
-  
-  std::string local_map_path_;
-  std::string map_topic_;
+
   std::string octomap_topic_;
   double octomap_resolution_;
-  double wall_height_m_;
-  double floor_z_m_;
-  int occupied_threshold_;
 
   ros::Subscriber octomap_sub_;
-  ros::Subscriber map_sub_;
   ros::Publisher plan_pub_;
   ros::Publisher status_pub_;
   ros::Publisher traversable_marker_pub_;

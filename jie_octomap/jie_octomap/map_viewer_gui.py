@@ -9,6 +9,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for _attr, _type in [("bool", bool), ("int", int), ("float", float), ("complex", complex), ("object", object), ("str", str)]:
+        if not hasattr(np, _attr):
+            setattr(np, _attr, _type)
 import rospy
 import yaml
 from jie_map_msgs.srv import (
@@ -38,7 +44,10 @@ from PyQt5.QtWidgets import (
 )
 import tf2_ros
 from visualization_msgs.msg import Marker
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+try:
+    from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+except ImportError:
+    from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import vtk
 from vtk.util import numpy_support
 
