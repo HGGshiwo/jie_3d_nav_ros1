@@ -12,22 +12,11 @@ namespace octo_planner
 {
 
 OctoLocalPlanner::OctoLocalPlanner()
-: tf_buffer_(nullptr),
-  costmap_ros_(nullptr),
-  initialized_(false),
-  map_ready_(false),
-  map_changed_(true),
-  last_local_rebuild_time_(0),
-  worker_running_(false),
-  target_index_(0),
-  pose_adjusting_(false),
-  goal_reached_(true)
-{
-}
+: tf_buffer_(nullptr), costmap_ros_(nullptr), initialized_(false), map_ready_(false),
+  map_changed_(true), last_local_rebuild_time_(0), worker_running_(false),
+  target_index_(0), pose_adjusting_(false), goal_reached_(true) {}
 
-OctoLocalPlanner::~OctoLocalPlanner()
-{
-}
+OctoLocalPlanner::~OctoLocalPlanner() {}
 
 void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap_2d::Costmap2DROS* costmap_ros)
 {
@@ -288,6 +277,25 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     idx++;
   }
 
+  // Check if current local band segment is blocked by obstacles; if so, run 3D A* local re-planning
+  if (local_band.size() >= 2 && map_ready_) {
+    const auto & p_start = local_band.front().pose.position;
+    const auto & p_goal  = local_band.back().pose.position;
+    octomap::point3d pt_start(static_cast<float>(p_start.x), static_cast<float>(p_start.y), static_cast<float>(p_start.z));
+    octomap::point3d pt_goal(static_cast<float>(p_goal.x), static_cast<float>(p_goal.y), static_cast<float>(p_goal.z));
+    if (!planner_.isLineTraversable(pt_start, pt_goal)) {
+      std::vector<GridIndex> path_cells;
+      std::string error_msg;
+      if (planner_.plan(p_start, p_goal, path_cells, error_msg)) {
+        auto replanned = planner_.generateSmoothPath(path_cells, local_band.front(), local_band.back(), true);
+        if (replanned.size() >= 2) {
+          local_band = replanned;
+          ROS_INFO_THROTTLE(1.0, "OctoLocalPlanner: Obstacle detected on local segment. Local 3D A* detour generated with %zu nodes.", local_band.size());
+        }
+      }
+    }
+  }
+
   // Optimize local band
   if (local_band.size() >= 3 && map_ready_)
   {
@@ -324,19 +332,6 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
           local_band[i].pose.position.z = alpha * local_band[i].pose.position.z + (1.0 - alpha) * prev_optimized_local_plan_[i].pose.position.z;
         }
       }
-    }
-
-    // Spatial 3-point moving average smoothing
-    if (local_band.size() >= 3)
-    {
-      std::vector<geometry_msgs::PoseStamped> smoothed_band = local_band;
-      for (size_t i = 1; i < local_band.size() - 1; ++i)
-      {
-        smoothed_band[i].pose.position.x = 0.25 * local_band[i-1].pose.position.x + 0.50 * local_band[i].pose.position.x + 0.25 * local_band[i+1].pose.position.x;
-        smoothed_band[i].pose.position.y = 0.25 * local_band[i-1].pose.position.y + 0.50 * local_band[i].pose.position.y + 0.25 * local_band[i+1].pose.position.y;
-        smoothed_band[i].pose.position.z = 0.25 * local_band[i-1].pose.position.z + 0.50 * local_band[i].pose.position.z + 0.25 * local_band[i+1].pose.position.z;
-      }
-      local_band = smoothed_band;
     }
 
     prev_optimized_local_plan_ = local_band;

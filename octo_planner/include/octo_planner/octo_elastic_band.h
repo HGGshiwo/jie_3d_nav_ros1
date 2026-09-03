@@ -42,6 +42,8 @@ public:
                 const OctoPlannerCore & planner);
 
 private:
+  void resampleBand(std::vector<geometry_msgs::PoseStamped> & band, double min_dist, double max_dist);
+
   bool getObstacleForce(const octomap::point3d & p,
                         const std::vector<octomap::point3d> & obstacles,
                         octomap::point3d & f_obs);

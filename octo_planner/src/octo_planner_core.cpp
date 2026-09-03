@@ -598,9 +598,15 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
 
     for (const auto & d : directions) {
       GridIndex nbr{current.idx.x + d.x, current.idx.y + d.y, current.idx.z + d.z};
-      if (closed_set.find(nbr) != closed_set.end()) continue;
-      if (traversable_cells_.find(nbr) == traversable_cells_.end())
-        continue;
+      bool is_nbr_traversable = false;
+      if (!traversable_cells_.empty()) {
+        is_nbr_traversable = (traversable_cells_.find(nbr) != traversable_cells_.end());
+      } else {
+        is_nbr_traversable = isCellTraversable(nbr, robot_radius_, require_ground_support_,
+                                               strict_direct_ground_support_, ground_support_xy_radius_cells_,
+                                               ground_support_depth_cells_);
+      }
+      if (!is_nbr_traversable) continue;
 
       double tentative_g = current.g + euclidean(current.idx, nbr);
       if (enable_preblocked_costmap_)

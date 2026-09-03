@@ -1,5 +1,7 @@
 #include "octo_planner/octo_elastic_band.h"
 #include <ros/ros.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <cmath>
 #include <limits>
 #include <algorithm>
@@ -9,6 +11,69 @@ namespace octo_planner
 
 OctoElasticBand::OctoElasticBand()
 {
+}
+
+void OctoElasticBand::resampleBand(std::vector<geometry_msgs::PoseStamped> & band, double min_dist, double max_dist)
+{
+  if (band.size() < 2) return;
+
+  std::vector<geometry_msgs::PoseStamped> resampled;
+  resampled.reserve(band.size());
+  resampled.push_back(band.front());
+
+  for (size_t i = 0; i < band.size() - 1; ++i)
+  {
+    const auto & p1 = resampled.back().pose.position;
+    const auto & p2 = band[i + 1].pose.position;
+    double dx = p2.x - p1.x;
+    double dy = p2.y - p1.y;
+    double dz = p2.z - p1.z;
+    double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (dist < min_dist && (i + 1) < band.size() - 1)
+    {
+      continue; // Skip sticking/redundant node (unless it is goal pose)
+    }
+
+    if (dist > max_dist)
+    {
+      int num_segments = static_cast<int>(std::ceil(dist / 0.10));
+      for (int k = 1; k < num_segments; ++k)
+      {
+        double t = static_cast<double>(k) / num_segments;
+        geometry_msgs::PoseStamped interp = band[i + 1];
+        interp.pose.position.x = p1.x + t * dx;
+        interp.pose.position.y = p1.y + t * dy;
+        interp.pose.position.z = p1.z + t * dz;
+        resampled.push_back(interp);
+      }
+    }
+
+    resampled.push_back(band[i + 1]);
+  }
+
+  // Update tangent orientation for all poses
+  for (size_t i = 0; i < resampled.size(); ++i)
+  {
+    double yaw = 0.0;
+    if (i + 1 < resampled.size())
+    {
+      double dx = resampled[i + 1].pose.position.x - resampled[i].pose.position.x;
+      double dy = resampled[i + 1].pose.position.y - resampled[i].pose.position.y;
+      yaw = std::atan2(dy, dx);
+    }
+    else if (i > 0)
+    {
+      double dx = resampled[i].pose.position.x - resampled[i - 1].pose.position.x;
+      double dy = resampled[i].pose.position.y - resampled[i - 1].pose.position.y;
+      yaw = std::atan2(dy, dx);
+    }
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, yaw);
+    resampled[i].pose.orientation = tf2::toMsg(q);
+  }
+
+  band = resampled;
 }
 
 bool OctoElasticBand::getObstacleForce(const octomap::point3d & p,
@@ -37,7 +102,7 @@ bool OctoElasticBand::getObstacleForce(const octomap::point3d & p,
 
       // Smooth quadratic repulsion force term with cap to prevent oscillation in narrow passages
       double term = (1.0 / std::max(0.08, dist)) - (1.0 / params_.safe_distance);
-      double f_mag = std::min(1.0, term * term);
+      double f_mag = std::min(2.5, term * term);
 
       // Continuous 2D horizontal repulsion vector
       f_obs.x() += (dx / d_xy) * f_mag;
@@ -52,6 +117,7 @@ bool OctoElasticBand::getObstacleForce(const octomap::point3d & p,
 void OctoElasticBand::optimize(std::vector<geometry_msgs::PoseStamped> & band,
                                const OctoPlannerCore & planner)
 {
+  resampleBand(band, 0.05, 0.18);
   if (band.size() < 3) return;
 
   ros::WallTime start_time = ros::WallTime::now();
@@ -91,27 +157,10 @@ void OctoElasticBand::optimize(std::vector<geometry_msgs::PoseStamped> & band,
     GridIndex snapped;
     int search_radius = std::min(4, params_.snap_search_radius_cells);
 
-    bool found_snap = false;
-    if (!planner.getTraversableCells().empty())
-    {
-      found_snap = planner.findNearestFreeCell(cell_idx, params_.robot_radius, search_radius,
-                                                params_.require_ground_support, params_.strict_direct_ground_support,
-                                                params_.ground_support_xy_radius_cells, params_.ground_support_depth_cells, snapped);
-    }
-    else
-    {
-      for (int dz = 0; dz <= search_radius; ++dz)
-      {
-        GridIndex below{cell_idx.x, cell_idx.y, cell_idx.z - dz};
-        if (planner.isOccupiedCell(below))
-        {
-          snapped = GridIndex{cell_idx.x, cell_idx.y, below.z + 1};
-          found_snap = true;
-          break;
-        }
-      }
-    }
-
+    // Reuse OctoPlannerCore's findNearestFreeCell (which checks isCellTraversable on-the-fly)
+    bool found_snap = planner.findNearestFreeCell(cell_idx, params_.robot_radius, search_radius,
+                                                   params_.require_ground_support, params_.strict_direct_ground_support,
+                                                   params_.ground_support_xy_radius_cells, params_.ground_support_depth_cells, snapped);
     if (found_snap)
     {
       ground_snapped_positions[i] = planner.gridToWorld(snapped);
@@ -147,7 +196,9 @@ void OctoElasticBand::optimize(std::vector<geometry_msgs::PoseStamped> & band,
           }
         }
 
-        if (found_ground_ref && pt.z() <= local_gz + 0.05) {
+        // Only voxels strictly below floor surface level are ground.
+        // Body-level obstacles sit above floor level.
+        if (found_ground_ref && pt.z() <= local_gz + 0.08) {
           is_ground_voxel = true;
         }
 
