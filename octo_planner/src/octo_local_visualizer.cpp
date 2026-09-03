@@ -1,5 +1,6 @@
 #include "octo_planner/octo_local_visualizer.h"
 #include <sensor_msgs/point_cloud2_iterator.h>
+#include <cmath>
 
 namespace octo_planner
 {
@@ -60,7 +61,8 @@ void OctoLocalVisualizer::publishCellSetMarker(
   ros::Publisher & publisher,
   const std::string & ns,
   float r_color, float g_color, float b_color, float a_color,
-  const OctoPlannerCore & planner) const
+  const OctoPlannerCore & planner,
+  double robot_x, double robot_y, double robot_yaw) const
 {
   auto octree = planner.getOctree();
   if (!octree) return;
@@ -81,8 +83,18 @@ void OctoLocalVisualizer::publishCellSetMarker(
   marker.color.b = b_color;
   marker.color.a = a_color;
   marker.points.reserve(cells.size());
+
+  // Shift ROI center forward along robot heading
+  const double center_x = robot_x + params_.roi_forward_shift * std::cos(robot_yaw);
+  const double center_y = robot_y + params_.roi_forward_shift * std::sin(robot_yaw);
+  const double roi_sq = params_.roi_radius_xy * params_.roi_radius_xy;
+
   for (const auto & c : cells) {
     const auto p = planner.gridToWorld(c);
+    double dx = p.x() - center_x;
+    double dy = p.y() - center_y;
+    if (dx * dx + dy * dy > roi_sq) continue; // Crop markers outside forward-shifted ROI!
+
     geometry_msgs::Point q;
     q.x = p.x(); q.y = p.y(); q.z = p.z();
     marker.points.push_back(q);
@@ -90,12 +102,26 @@ void OctoLocalVisualizer::publishCellSetMarker(
   publisher.publish(marker);
 }
 
-void OctoLocalVisualizer::publishRiskCostCloud(const OctoPlannerCore & planner) const
+void OctoLocalVisualizer::publishRiskCostCloud(const OctoPlannerCore & planner, double robot_x, double robot_y, double robot_yaw) const
 {
   const auto costmap = planner.getPreblockedCostmap();
   sensor_msgs::PointCloud2 cloud_msg;
   cloud_msg.header.stamp = ros::Time::now();
   cloud_msg.header.frame_id = params_.map_frame;
+
+  const double center_x = robot_x + params_.roi_forward_shift * std::cos(robot_yaw);
+  const double center_y = robot_y + params_.roi_forward_shift * std::sin(robot_yaw);
+  const double roi_sq = params_.roi_radius_xy * params_.roi_radius_xy;
+
+  std::vector<std::pair<octomap::point3d, float>> valid_points;
+  for (const auto & entry : costmap) {
+    const auto p = planner.gridToWorld(entry.first);
+    double dx = p.x() - center_x;
+    double dy = p.y() - center_y;
+    if (dx * dx + dy * dy <= roi_sq) {
+      valid_points.push_back({p, static_cast<float>(entry.second)});
+    }
+  }
 
   sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
   modifier.setPointCloud2Fields(4,
@@ -103,17 +129,16 @@ void OctoLocalVisualizer::publishRiskCostCloud(const OctoPlannerCore & planner) 
     "y", 1, sensor_msgs::PointField::FLOAT32,
     "z", 1, sensor_msgs::PointField::FLOAT32,
     "intensity", 1, sensor_msgs::PointField::FLOAT32);
-  modifier.resize(costmap.size());
+  modifier.resize(valid_points.size());
 
   sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
   sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
   sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
   sensor_msgs::PointCloud2Iterator<float> iter_i(cloud_msg, "intensity");
 
-  for (const auto & entry : costmap) {
-    const auto p = planner.gridToWorld(entry.first);
-    *iter_x = p.x(); *iter_y = p.y(); *iter_z = p.z();
-    *iter_i = static_cast<float>(entry.second);
+  for (const auto & entry : valid_points) {
+    *iter_x = entry.first.x(); *iter_y = entry.first.y(); *iter_z = entry.first.z();
+    *iter_i = entry.second;
     ++iter_x; ++iter_y; ++iter_z; ++iter_i;
   }
   risk_cost_pub_.publish(cloud_msg);

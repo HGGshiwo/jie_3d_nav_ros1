@@ -13,12 +13,13 @@ namespace octo_planner
 
 struct ElasticBandParams
 {
-  int iterations = 30;
-  double w_smooth = 0.3;
-  double w_obstacle = 0.5;
+  int iterations = 40;
+  double w_smooth = 1.0;
+  double w_obstacle = 0.8;
+  double w_tangent = 0.0; // Sideways tangential bypass force weight (disabled to prevent sign chattering)
   double w_ground = 0.4;
-  double safe_distance = 0.30;
-  double learning_rate = 0.1;
+  double safe_distance = 0.35; // Safe obstacle clearance (narrow passage friendly)
+  double learning_rate = 0.03; // Stable learning rate to prevent overshoot
   double robot_radius = 0.20;
   bool require_ground_support = true;
   bool strict_direct_ground_support = false;
@@ -41,10 +42,9 @@ public:
                 const OctoPlannerCore & planner);
 
 private:
-  bool getDistanceAndGradient(const octomap::point3d & p,
-                              const std::vector<octomap::point3d> & obstacles,
-                              double & distance,
-                              octomap::point3d & gradient);
+  bool getObstacleForce(const octomap::point3d & p,
+                        const std::vector<octomap::point3d> & obstacles,
+                        octomap::point3d & f_obs);
 
   ElasticBandParams params_;
 };

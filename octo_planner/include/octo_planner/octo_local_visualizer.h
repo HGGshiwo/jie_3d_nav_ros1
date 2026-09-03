@@ -23,6 +23,8 @@ struct VisualizerParams
   int debug_view_size_px = 640;
   double debug_ppm = 80.0;
   double debug_view_frequency = 10.0;
+  double roi_radius_xy = 3.5; // Expanded forward ROI radius
+  double roi_forward_shift = 1.5; // Forward shift along robot heading
 };
 
 class OctoLocalVisualizer
@@ -40,8 +42,9 @@ public:
     ros::Publisher & publisher,
     const std::string & ns,
     float r_color, float g_color, float b_color, float a_color,
-    const OctoPlannerCore & planner) const;
-  void publishRiskCostCloud(const OctoPlannerCore & planner) const;
+    const OctoPlannerCore & planner,
+    double robot_x = 0.0, double robot_y = 0.0, double robot_yaw = 0.0) const;
+  void publishRiskCostCloud(const OctoPlannerCore & planner, double robot_x = 0.0, double robot_y = 0.0, double robot_yaw = 0.0) const;
   void clearMarkers();
 
   ros::Publisher & getTraversablePub() { return traversable_marker_pub_; }

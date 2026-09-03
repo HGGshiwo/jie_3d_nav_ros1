@@ -30,6 +30,10 @@ struct GridIndex
   {
     return x == other.x && y == other.y && z == other.z;
   }
+  bool operator!=(const GridIndex & other) const
+  {
+    return !(*this == other);
+  }
 };
 
 struct GridIndexHash
@@ -178,6 +182,7 @@ public:
   bool findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
                            bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const;
   bool queryCellDebugInfo(const GridIndex & idx, CellDebugDetails & details) const;
+  double getPreblockedCost(const GridIndex & idx) const;
 
 private:
   double euclidean(const GridIndex & a, const GridIndex & b) const;
@@ -186,7 +191,6 @@ private:
   bool hasNonOccupiedNeighborSameLevel(const GridIndex & idx) const;
   bool hasSameLevelNeighborWithOccupiedBelow(const GridIndex & idx) const;
   bool hasSameLevelNeighborWithOccupiedAbove(const GridIndex & idx) const;
-  double getPreblockedCost(const GridIndex & idx) const;
   std::vector<GridIndex> makeDirections() const;
   std::string getPreblockedReason(const GridIndex & idx) const;
 

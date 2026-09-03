@@ -61,18 +61,38 @@ void PointCloudROICropNode::onPointCloud(const sensor_msgs::PointCloud2::ConstPt
   }
 
   double rx = 0.0, ry = 0.0, rz = 0.0;
-  std::string odom_frame;
-  if (!getLatestRobotPose(rx, ry, rz, odom_frame)) {
-    // Fallback: try TF lookup if odom topic hasn't arrived
+  std::string odom_frame = target_frame_;
+  bool got_pose = getLatestRobotPose(rx, ry, rz, odom_frame);
+
+  double sensor_rx = 0.0, sensor_ry = 0.0, sensor_rz = 0.0;
+
+  if (msg->header.frame_id == odom_frame || msg->header.frame_id == target_frame_)
+  {
+    sensor_rx = rx;
+    sensor_ry = ry;
+    sensor_rz = rz;
+  }
+  else
+  {
+    // Point cloud is in sensor frame (e.g. realsense, velodyne, base_link).
+    // Transform robot pose into point cloud sensor frame for frame-consistent bounding box check.
+    geometry_msgs::PoseStamped pose_in, pose_out;
+    pose_in.header.frame_id = got_pose ? odom_frame : target_frame_;
+    pose_in.header.stamp = ros::Time(0);
+    pose_in.pose.position.x = rx;
+    pose_in.pose.position.y = ry;
+    pose_in.pose.position.z = rz;
+    pose_in.pose.orientation.w = 1.0;
+
     try {
-      geometry_msgs::TransformStamped tf = tf_buffer_.lookupTransform(msg->header.frame_id, "base_link", ros::Time(0), ros::Duration(0.01));
-      rx = tf.transform.translation.x;
-      ry = tf.transform.translation.y;
-      rz = tf.transform.translation.z;
+      tf_buffer_.transform(pose_in, pose_out, msg->header.frame_id, ros::Duration(0.01));
+      sensor_rx = pose_out.pose.position.x;
+      sensor_ry = pose_out.pose.position.y;
+      sensor_rz = pose_out.pose.position.z;
     } catch (...) {
-      // If no pose available yet, pass through or skip
-      cloud_pub_.publish(*msg);
-      return;
+      sensor_rx = 0.0;
+      sensor_ry = 0.0;
+      sensor_rz = 0.0;
     }
   }
 
@@ -90,18 +110,18 @@ void PointCloudROICropNode::onPointCloud(const sensor_msgs::PointCloud2::ConstPt
   sensor_msgs::PointCloud2ConstIterator<float> iter_in_y(*msg, "y");
   sensor_msgs::PointCloud2ConstIterator<float> iter_in_z(*msg, "z");
 
-  // Pre-allocate temporary vectors for cropped points
   std::vector<float> valid_x, valid_y, valid_z;
   valid_x.reserve(msg->width * msg->height / 4);
   valid_y.reserve(msg->width * msg->height / 4);
   valid_z.reserve(msg->width * msg->height / 4);
 
-  const double min_x = rx - crop_radius_xy_;
-  const double max_x = rx + crop_radius_xy_;
-  const double min_y = ry - crop_radius_xy_;
-  const double max_y = ry + crop_radius_xy_;
-  const double min_z = rz - crop_height_below_;
-  const double max_z = rz + crop_height_above_;
+  // Forward-shifted ROI bounds: -1.0m behind to +4.5m in front of robot
+  const double min_x = sensor_rx - 1.0;
+  const double max_x = sensor_rx + (crop_radius_xy_ + 1.5);
+  const double min_y = sensor_ry - crop_radius_xy_;
+  const double max_y = sensor_ry + crop_radius_xy_;
+  const double min_z = sensor_rz - crop_height_below_;
+  const double max_z = sensor_rz + crop_height_above_;
 
   for (; iter_in_x != iter_in_x.end(); ++iter_in_x, ++iter_in_y, ++iter_in_z) {
     const float px = *iter_in_x;

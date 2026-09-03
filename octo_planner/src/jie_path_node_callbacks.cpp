@@ -189,7 +189,7 @@ void JiePathNode::onExternalPreblockedMarker(const visualization_msgs::Marker::C
   if (!octree) return;
   for (const auto & point : msg->points) {
     const octo_planner::GridIndex idx = planner_.worldToGrid(point.x, point.y, point.z);
-    if (planner_.isInsideMetricBounds(idx) && !planner_.isInsideMetricBounds(idx)) // occupied is checked inside core
+    if (planner_.isInsideMetricBounds(idx) && !planner_.isOccupiedCell(idx)) // occupied is checked inside core
       external_cells.insert(idx);
   }
   planner_.setExternalPreblockedCells(external_cells);

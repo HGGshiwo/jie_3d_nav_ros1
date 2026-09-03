@@ -7,15 +7,20 @@
 #include <tf2_ros/buffer.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
-#include <visualization_msgs/Marker.h>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
 #include <std_msgs/String.h>
 #include <string>
 #include <vector>
-#include <opencv2/opencv.hpp>
+#include <memory>
+#include <atomic>
+#include <thread>
+#include <mutex>
 
 #include "octo_planner/octo_planner_core.h"
+#include "octo_planner/octo_elastic_band.h"
+#include "octo_planner/octo_local_visualizer.h"
+#include "octo_planner/d1_velocity_smoother.h"
 
 namespace octo_planner
 {
@@ -39,52 +44,35 @@ private:
   // Local Octomap callback
   void onOctomap(const octomap_msgs::Octomap::ConstPtr & msg);
 
-  // 3D Elastic Band Optimization
-  void optimizeElasticBand(std::vector<geometry_msgs::PoseStamped>& band);
-  bool getDistanceAndGradient(const octomap::point3d& p, const std::vector<octomap::point3d>& obstacles, double& distance, octomap::point3d& gradient);
+  // Background Octomap deserialization worker
+  void processOctomapAsync(const octomap_msgs::Octomap::ConstPtr & msg);
 
-  // Helper functions
-  bool isFinalTrackingPointReached(const TrackingTarget & target) const;
+  // Helper tracking & TF functions
   int findInitialTargetIndex3D();
-  bool selectTrackingTarget(TrackingTarget & target);
   bool lookupRobotPose2D(RobotPose2D & robot_pose);
-  double xyDistanceToPlanPoint(const RobotPose2D & rp, int idx) const;
-  
   bool computeFinalYawErrorXY(const geometry_msgs::PoseStamped & final_pose_in, double & yaw_error);
   bool transformToBase(const geometry_msgs::PoseStamped & pose_in, geometry_msgs::PoseStamped & pose_out);
   
-  std::vector<std::string> getBaseFrameCandidates() const;
-  bool shouldApplyRobotCenterOffset(const std::string & frame) const;
-  void applyRobotCenterOffset(const std::string & frame, RobotPose2D & rp) const;
-  void applyRobotCenterOffsetToRelativePose(const std::string & frame, geometry_msgs::PoseStamped & pose) const;
+  bool shouldApplyRobotCenterOffset(const std::string & frame) const { return frame == robot_center_offset_frame_; }
+  void applyRobotCenterOffset(const std::string & frame, RobotPose2D & rp) const {
+    if (!shouldApplyRobotCenterOffset(frame)) return;
+    const double cy = std::cos(rp.yaw), sy = std::sin(rp.yaw);
+    rp.x += cy * robot_center_offset_x_ - sy * robot_center_offset_y_;
+    rp.y += sy * robot_center_offset_x_ + cy * robot_center_offset_y_;
+    rp.z += robot_center_offset_z_;
+  }
+  void applyRobotCenterOffsetToRelativePose(const std::string & frame, geometry_msgs::PoseStamped & pose) const {
+    if (!shouldApplyRobotCenterOffset(frame)) return;
+    pose.pose.position.x -= robot_center_offset_x_;
+    pose.pose.position.y -= robot_center_offset_y_;
+    pose.pose.position.z -= robot_center_offset_z_;
+  }
 
-  // Visualization & Debug
-  void publishTrackingPointMarker();
-  void publishLocalBandMarkers(const std::vector<geometry_msgs::PoseStamped>& band);
-  void clearMarkers();
-  void publishCellSetMarker(
-    const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
-    ros::Publisher & publisher,
-    const std::string & ns,
-    const std::string & frame_id,
-    float r_color, float g_color, float b_color, float a_color) const;
-  void publishRiskCostCloud(const std::string & frame_id) const;
-  void renderTrackingDebugView(const ros::TimerEvent &);
-  void renderTrackingDebugViewImpl();
-  
-  cv::Point projectPlanPoint(
-    const RobotPose2D & rp,
-    const geometry_msgs::PoseStamped & pose,
-    const cv::Point & center, double ppm) const;
-
-  bool drawFinalGoalYaw(
-    cv::Mat & image, const RobotPose2D & rp,
-    const cv::Point & center, double ppm, double & yaw_error) const;
-
-  // Static math & string helpers
   static double clamp(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
   static double applyDeadband(double v, double db) { return std::abs(v) < db ? 0.0 : v; }
   static double normalizeAngle(double a) { return std::atan2(std::sin(a), std::cos(a)); }
+
+  void publishStatus(const std::string& status);
 
   // TF & Costmap Pointers
   tf2_ros::Buffer* tf_buffer_;
@@ -93,30 +81,28 @@ private:
   bool map_ready_;
   bool map_changed_;
   ros::Time last_local_rebuild_time_;
+  ros::Time last_control_time_;
 
-  // ROS communications & timers
+  // ROS communications
   ros::NodeHandle nh_;
   ros::Subscriber octomap_sub_;
-  ros::Publisher marker_pub_;
-  ros::Publisher band_marker_pub_;
   ros::Publisher status_pub_;
-  ros::Publisher debug_image_pub_;
-  ros::Publisher traversable_marker_pub_;
-  ros::Publisher preblocked_marker_pub_;
-  ros::Publisher risk_cost_pub_;
-  ros::Timer debug_view_timer_;
 
-  // OctoPlannerCore instance for local traversability & ground checks
+  // Planner Components
   OctoPlannerCore planner_;
+  OctoElasticBand elastic_band_;
+  OctoLocalVisualizer visualizer_;
+  D1VelocitySmoother velocity_smoother_;
+
+  // Async octomap worker thread & atomic ptr
+  std::shared_ptr<octomap::OcTree> active_octree_;
+  std::atomic<bool> worker_running_;
 
   // Parameters
   std::string map_frame_;
   std::string robot_center_offset_frame_;
   double robot_center_offset_x_, robot_center_offset_y_, robot_center_offset_z_;
-  double lookahead_distance_, tracking_xy_tol_, tracking_marker_scale_;
-  bool   enable_debug_view_;
-  int    debug_view_size_px_;
-  double debug_ppm_, debug_view_frequency_;
+  double lookahead_distance_, tracking_xy_tol_;
   double goal_pos_tol_, goal_yaw_tol_;
   double linear_gain_, lateral_gain_, heading_gain_, cross_track_angular_gain_, final_yaw_gain_;
   bool   enable_lateral_motion_;
@@ -124,7 +110,6 @@ private:
   bool   align_final_yaw_;
   double linear_deadband_, lateral_deadband_, angular_deadband_;
 
-  // 3D Planner Parameters
   double robot_radius_;
   bool require_ground_support_;
   bool strict_direct_ground_support_;
@@ -134,24 +119,13 @@ private:
   int robot_clearance_height_cells_;
   int snap_search_radius_cells_;
 
-  // Elastic Band Parameters
-  int eb_iterations_;
-  double eb_w_smooth_;
-  double eb_w_obstacle_;
-  double eb_w_ground_;
-  double eb_safe_distance_;
-  double eb_learning_rate_;
-
-  // Helper status function
-  void publishStatus(const std::string& status);
-
   // Planner state
   std::vector<geometry_msgs::PoseStamped> global_plan_;
   std::vector<geometry_msgs::PoseStamped> optimized_local_plan_;
+  std::vector<geometry_msgs::PoseStamped> prev_optimized_local_plan_;
   int    target_index_;
   bool   pose_adjusting_;
   bool   goal_reached_;
-  bool   debug_view_disabled_;
   std::string last_status_;
   geometry_msgs::Twist last_cmd_vel_;
   std::recursive_mutex planner_mutex_;
