@@ -82,15 +82,10 @@ private:
       }
     }
 
-    for (const auto & key : known_cells) {
-      const double wx = (static_cast<double>(key.x) + 0.5) * octomap_resolution_;
-      const double wy = (static_cast<double>(key.y) + 0.5) * octomap_resolution_;
-      tree.updateNode(wx, wy, floor_z_m_ + 0.5 * octomap_resolution_, true);
-    }
     for (const auto & key : occupied_cells) {
       const double wx = (static_cast<double>(key.x) + 0.5) * octomap_resolution_;
       const double wy = (static_cast<double>(key.y) + 0.5) * octomap_resolution_;
-      for (int z = 1; z <= height_cells; ++z) {
+      for (int z = 0; z <= height_cells; ++z) {
         const double wz = floor_z_m_ + (static_cast<double>(z) + 0.5) * octomap_resolution_;
         tree.updateNode(wx, wy, wz, true);
       }

@@ -4,6 +4,7 @@
     <arg name="robot_name" default=""/>
     <arg name="point_cloud_topic" default="camera/depth/points"/>
     <arg name="global_octomap_topic" default="/octomap_global"/>
+    <arg name="fused_octomap_topic" default="/octomap_fused"/>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
         <rosparam file="$(find jie_octomap)/config/move_base/costmap_common_params.yaml" command="load" ns="global_costmap" />
@@ -13,13 +14,13 @@
         <rosparam file="$(find jie_octomap)/config/move_base/move_base_params.yaml" command="load" />
         
         <param name="base_global_planner" value="octo_planner/OctoGlobalPlanner"/>
-        <!-- <param name="base_local_planner" value="octo_planner/OctoLocalPlanner"/> -->
-        <param name="base_local_planner" value="octo_planner/D1LocalPlanner"/>
+        <param name="base_local_planner" value="octo_planner/OctoLocalPlanner"/>
+        <!-- <param name="base_local_planner" value="octo_planner/D1LocalPlanner"/> -->
          
         <!-- Pass octomap topic to global planner -->
         <param name="OctoGlobalPlanner/octomap_topic" value="$(arg global_octomap_topic)"/>
-        <param name="OctoLocalPlanner/octomap_topic" value="/octomap_local"/>
-        <param name="D1LocalPlanner/octomap_topic" value="/octomap_local"/>
+        <param name="OctoLocalPlanner/octomap_topic" value="$(arg fused_octomap_topic)"/>
+        <param name="D1LocalPlanner/octomap_topic" value="$(arg fused_octomap_topic)"/>
 
         <!-- 加载全局统一 3D 规划器参数配置 -->
         <rosparam file="$(find octo_planner)/config/planner_params.yaml" command="load" ns="OctoGlobalPlanner" />
@@ -29,11 +30,11 @@
 
         <!-- explicitly define frame ids for movebase -->
         <param name="global_costmap/global_frame"                   value="$(arg frame_prefix)map"/>
-        <param name="global_costmap/robot_base_frame"               value="$(arg frame_prefix)base_footprint"/>
+        <param name="global_costmap/robot_base_frame"               value="$(arg frame_prefix)base_link"/>
         <param name="global_costmap/2d_obstacles_layer/scan/topic"  value="$(arg robot_name)scan"/>
         <param name="global_costmap/3d_obstacles_layer/depth/topic" value="$(arg point_cloud_topic)"/>
         <param name="local_costmap/global_frame"                    value="$(arg frame_prefix)odom"/>
-        <param name="local_costmap/robot_base_frame"                value="$(arg frame_prefix)base_footprint"/>
+        <param name="local_costmap/robot_base_frame"                value="$(arg frame_prefix)base_link"/>
         <param name="local_costmap/2d_obstacles_layer/scan/topic"   value="$(arg robot_name)scan"/>
         <param name="local_costmap/3d_obstacles_layer/depth/topic"  value="$(arg point_cloud_topic)"/>
     </node>

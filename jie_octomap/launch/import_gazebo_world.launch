@@ -35,6 +35,7 @@
 
     <!-- world_selector_gui_node -->
     <node pkg="jie_octomap" type="world_selector_gui.py" name="world_selector_gui" output="screen">
+        <env name="LIBGL_ALWAYS_SOFTWARE" value="1" />
         <param name="world_name" value="$(arg world_name)"/>
         <param name="world_file_cmd_topic" value="/world_file_cmd"/>
         <param name="occupied_marker_topic" value="/octomap_occupied_markers"/>

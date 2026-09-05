@@ -7,7 +7,7 @@ Panels:
         - /Global Options1
         - /Status1
         - /Odometry1/Shape1
-        - /Marker3
+        - /Marker1
       Splitter Ratio: 0.5
     Tree Height: 555
   - Class: rviz/Selection
@@ -326,22 +326,6 @@ Visualization Manager:
       Value: true
     - Class: rviz/Marker
       Enabled: true
-      Marker Topic: /octomap_local_markers
-      Name: Marker
-      Namespaces:
-        occupied_voxels: true
-      Queue Size: 100
-      Value: true
-    - Class: rviz/Marker
-      Enabled: false
-      Marker Topic: /octomap_global_markers
-      Name: Marker
-      Namespaces:
-        {}
-      Queue Size: 100
-      Value: false
-    - Class: rviz/Marker
-      Enabled: true
       Marker Topic: /move_base/OctoLocalPlanner/preblocked_cells
       Name: Marker
       Namespaces:
@@ -384,6 +368,46 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /move_base/OctoLocalPlanner/raw_local_band
+      Name: Marker
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /move_base/OctoLocalPlanner/emergency_stop_markers
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: false
+      Marker Topic: /octomap_global_markers
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: false
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /octomap_local_markers
+      Name: MarkerArray
+      Namespaces:
+        occupied_voxels: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /octomap_fused_markers
+      Name: MarkerArray
+      Namespaces:
+        occupied_voxels: true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -412,7 +436,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 18.25034523010254
+      Distance: 9.616678237915039
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -420,17 +444,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 7.043968200683594
-        Y: 3.4320149421691895
-        Z: -1.2175285816192627
+        X: 2.6371920108795166
+        Y: 2.8122544288635254
+        Z: -2.470799446105957
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5997962951660156
+      Pitch: 0.6597959399223328
       Target Frame: <Fixed Frame>
-      Yaw: 3.6722259521484375
+      Yaw: 3.9672300815582275
     Saved: ~
 Window Geometry:
   Displays:
@@ -448,5 +472,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1200
-  X: 381
-  Y: 203
+  X: 434
+  Y: 67

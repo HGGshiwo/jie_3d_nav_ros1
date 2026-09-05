@@ -45,10 +45,34 @@ let layers = {
     occupied: new LayerManager(scene, "occupied", [0.4, 0.4, 0.4]),
     preblocked: new LayerManager(scene, "preblocked", [0.4, 0.4, 0.4]),
     traversable: new LayerManager(scene, "traversable", [0.4, 0.4, 0.4]),
-    risk_cost: new LayerManager(scene, "risk_cost", [0.4, 0.4, 0.4])
+    risk_cost: new LayerManager(scene, "risk_cost", [0.4, 0.4, 0.4]),
+    local_octomap: new LayerManager(scene, "local_octomap", [0.2, 0.2, 0.2]),
+    fused_octomap: new LayerManager(scene, "fused_octomap", [0.2, 0.2, 0.2]),
+    emergency_stop_free: new LayerManager(scene, "emergency_stop_free", [0.06, 0.06, 0.06]),
+    emergency_stop_occupied: new LayerManager(scene, "emergency_stop_occupied", [0.10, 0.10, 0.10])
 };
 layers.traversable.mesh.visible = false;
 layers.risk_cost.mesh.visible = false;
+layers.local_octomap.mesh.visible = false;
+layers.fused_octomap.mesh.visible = false;
+layers.emergency_stop_free.mesh.visible = false;
+layers.emergency_stop_occupied.mesh.visible = false;
+
+// 检查并返回当前已勾选需要传输的图层列表
+function getActiveRequestedLayers() {
+    const requested = [];
+    if (document.getElementById('show-occupied')?.checked) requested.push('occupied');
+    if (document.getElementById('show-preblocked')?.checked) requested.push('preblocked');
+    if (document.getElementById('show-traversable')?.checked) requested.push('traversable');
+    if (document.getElementById('show-risk-cost')?.checked) requested.push('risk_cost');
+    if (document.getElementById('show-octomap-local')?.checked) requested.push('local_octomap');
+    if (document.getElementById('show-octomap-fused')?.checked) requested.push('fused_octomap');
+    if (document.getElementById('show-emergency-stop')?.checked) {
+        requested.push('emergency_stop_free');
+        requested.push('emergency_stop_occupied');
+    }
+    return requested;
+}
 
 // 监听复选框，切换图层显隐
 document.getElementById('show-occupied').addEventListener('change', (e) => {
@@ -62,6 +86,22 @@ document.getElementById('show-traversable').addEventListener('change', (e) => {
 });
 document.getElementById('show-risk-cost').addEventListener('change', (e) => {
     layers.risk_cost.mesh.visible = e.target.checked;
+});
+document.getElementById('show-octomap-local')?.addEventListener('change', (e) => {
+    layers.local_octomap.mesh.visible = e.target.checked;
+    if (!e.target.checked) layers.local_octomap.loadFromArray([], layers.local_octomap.scale);
+});
+document.getElementById('show-octomap-fused')?.addEventListener('change', (e) => {
+    layers.fused_octomap.mesh.visible = e.target.checked;
+    if (!e.target.checked) layers.fused_octomap.loadFromArray([], layers.fused_octomap.scale);
+});
+document.getElementById('show-emergency-stop')?.addEventListener('change', (e) => {
+    layers.emergency_stop_free.mesh.visible = e.target.checked;
+    layers.emergency_stop_occupied.mesh.visible = e.target.checked;
+    if (!e.target.checked) {
+        layers.emergency_stop_free.loadFromArray([], layers.emergency_stop_free.scale);
+        layers.emergency_stop_occupied.loadFromArray([], layers.emergency_stop_occupied.scale);
+    }
 });
 const showRobotEl = document.getElementById('show-robot');
 if (showRobotEl) {
@@ -144,8 +184,11 @@ function getInteractionTarget() {
 
     // 1. 尝试与场景中所有显示的体素求交
     const meshesToIntersect = [];
-    if (layers.occupied.mesh.visible) meshesToIntersect.push(layers.occupied.mesh);
-    if (layers.preblocked.mesh.visible) meshesToIntersect.push(layers.preblocked.mesh);
+    Object.keys(layers).forEach(name => {
+        if (layers[name] && layers[name].mesh && layers[name].mesh.visible) {
+            meshesToIntersect.push(layers[name].mesh);
+        }
+    });
 
     const voxelIntersects = raycaster.intersectObjects(meshesToIntersect);
     
@@ -159,8 +202,11 @@ function getInteractionTarget() {
         const instanceId = hit.instanceId;
         
         let hitLayerName = null;
-        if (hitMesh === layers.occupied.mesh) hitLayerName = 'occupied';
-        else if (hitMesh === layers.preblocked.mesh) hitLayerName = 'preblocked';
+        Object.keys(layers).forEach(name => {
+            if (layers[name] && layers[name].mesh === hitMesh) {
+                hitLayerName = name;
+            }
+        });
         
         if (params.tool === 'eraser') {
             console.log("【橡皮擦调试】击中网格图层:", hitLayerName, "；instanceId:", instanceId);
@@ -173,13 +219,13 @@ function getInteractionTarget() {
             }
             if (voxel) {
                 const normal = hit.face.normal.clone();
-                // 物体无旋转，故世界法向等于局部法向
+                const vScale = voxel.scale || layers[hitLayerName].scale;
                 return {
                     type: 'voxel',
                     layerName: hitLayerName,
                     voxel: voxel,
                     normal: normal,
-                    scale: layers[hitLayerName].scale
+                    scale: vScale
                 };
             }
         }
@@ -292,12 +338,19 @@ function updateCursorVisual() {
         return;
     }
 
-    if (params.tool === 'debug') {
-        cursor.material.color.setHex(0x2196F3); // 蓝色高亮表示调试选中
+    if (params.tool === 'debug' || params.tool === 'debug_air') {
+        cursor.material.color.setHex(params.tool === 'debug' ? 0x2196F3 : 0x00BCD4); // 蓝色表示已有体素，青色表示空网格
         if (activeHit.type === 'voxel') {
-            const newX = activeHit.voxel.x + activeHit.normal.x * activeHit.scale[0];
-            const newY = activeHit.voxel.y + activeHit.normal.y * activeHit.scale[1];
-            const newZ = activeHit.voxel.z + activeHit.normal.z * activeHit.scale[2];
+            let newX, newY, newZ;
+            if (params.tool === 'debug') {
+                newX = activeHit.voxel.x;
+                newY = activeHit.voxel.y;
+                newZ = activeHit.voxel.z;
+            } else {
+                newX = activeHit.voxel.x + activeHit.normal.x * activeHit.scale[0];
+                newY = activeHit.voxel.y + activeHit.normal.y * activeHit.scale[1];
+                newZ = activeHit.voxel.z + activeHit.normal.z * activeHit.scale[2];
+            }
             cursor.position.set(newX, newY, newZ);
             cursor.scale.set(activeHit.scale[0] * 0.98, activeHit.scale[1] * 0.98, activeHit.scale[2] * 1.02);
         } else if (activeHit.type === 'plane') {
@@ -588,6 +641,52 @@ setInterval(async () => {
     }
 }, 500);
 
+// 动态图层轮询（仅当在前端勾选图层时，才以 300ms 频率向后端请求对应图层数据；未勾选则完全不请求）
+setInterval(async () => {
+    const activeLayers = getActiveRequestedLayers();
+    if (activeLayers.length === 0) return;
+    
+    try {
+        const queryStr = `?layers=${activeLayers.join(',')}`;
+        const res = await fetch(`/api/get_current_map${queryStr}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (data.layers) {
+                if (data.layers.local_octomap && document.getElementById('show-octomap-local')?.checked) {
+                    layers.local_octomap.loadFromArray(data.layers.local_octomap.points, data.layers.local_octomap.scale, null, data.layers.local_octomap.groups);
+                }
+                if (data.layers.fused_octomap && document.getElementById('show-octomap-fused')?.checked) {
+                    layers.fused_octomap.loadFromArray(data.layers.fused_octomap.points, data.layers.fused_octomap.scale, null, data.layers.fused_octomap.groups);
+                }
+                if (document.getElementById('show-emergency-stop')?.checked) {
+                    if (data.layers.emergency_stop_free) {
+                        layers.emergency_stop_free.loadFromArray(data.layers.emergency_stop_free.points, data.layers.emergency_stop_free.scale, null, data.layers.emergency_stop_free.groups);
+                    }
+                    if (data.layers.emergency_stop_occupied) {
+                        layers.emergency_stop_occupied.loadFromArray(data.layers.emergency_stop_occupied.points, data.layers.emergency_stop_occupied.scale, null, data.layers.emergency_stop_occupied.groups);
+                    }
+                }
+                if (data.layers.traversable && document.getElementById('show-traversable')?.checked) {
+                    layers.traversable.loadFromArray(data.layers.traversable.points, data.layers.traversable.scale, null, data.layers.traversable.groups);
+                }
+                if (data.layers.risk_cost && document.getElementById('show-risk-cost')?.checked) {
+                    layers.risk_cost.loadFromArray(data.layers.risk_cost.points, data.layers.risk_cost.scale, data.layers.risk_cost.intensities, data.layers.risk_cost.groups);
+                }
+                if (!isDirty) {
+                    if (data.layers.occupied && document.getElementById('show-occupied')?.checked) {
+                        layers.occupied.loadFromArray(data.layers.occupied.points, data.layers.occupied.scale, null, data.layers.occupied.groups);
+                    }
+                    if (data.layers.preblocked && document.getElementById('show-preblocked')?.checked) {
+                        layers.preblocked.loadFromArray(data.layers.preblocked.points, data.layers.preblocked.scale, null, data.layers.preblocked.groups);
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        // 忽略网络抖动
+    }
+}, 300);
+
 // 页面加载时自动获取先前缓存的地图配置或默认配置并加载，避免手动重新输入
 async function initDefaultMap() {
     const cachedRoot = localStorage.getItem('map_root_path');
@@ -681,13 +780,13 @@ window.addEventListener('pointermove', (event) => {
     }
 });
 
-async function queryCellDebugInfo(x, y, z) {
+async function queryCellDebugInfo(x, y, z, layerName = '') {
     statusEl.innerText = `正在查询网格诊断信息...`;
     try {
         const res = await fetch('/api/debug_cell', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ x, y, z })
+            body: JSON.stringify({ x, y, z, layer_name: layerName })
         });
         if (!res.ok) throw new Error((await res.json()).detail || "查询失败");
         const data = await res.json();
@@ -741,6 +840,11 @@ async function queryCellDebugInfo(x, y, z) {
 
             document.getElementById('debug-traversable').innerText = data.is_traversable ? "是 (Yes)" : "否 (No)";
             document.getElementById('debug-traversable').style.color = data.is_traversable ? "#4CAF50" : "#f44336";
+
+            const nodeSourceEl = document.getElementById('debug-node-source');
+            if (nodeSourceEl) {
+                nodeSourceEl.innerText = data.node_source_info || "无";
+            }
 
             // 缓存最新诊断数据以备复制
             latestDebugData = {
@@ -798,21 +902,29 @@ window.addEventListener('pointerdown', (event) => {
         return;
     }
     
-    if (params.tool === 'debug') {
+    if (params.tool === 'debug' || params.tool === 'debug_air') {
         const hitTarget = getInteractionTarget();
         if (hitTarget) {
             let px, py, pz;
             if (hitTarget.type === 'voxel') {
-                // 与画笔逻辑对齐，查询表面相邻的邻近空闲网格
-                px = hitTarget.voxel.x + hitTarget.normal.x * hitTarget.scale[0];
-                py = hitTarget.voxel.y + hitTarget.normal.y * hitTarget.scale[1];
-                pz = hitTarget.voxel.z + hitTarget.normal.z * hitTarget.scale[2];
+                if (params.tool === 'debug') {
+                    // 调试已有体素：精确查询被点击体素本身的坐标
+                    px = hitTarget.voxel.x;
+                    py = hitTarget.voxel.y;
+                    pz = hitTarget.voxel.z;
+                } else {
+                    // 调试空网格：查询表面相邻的空闲网格
+                    px = hitTarget.voxel.x + hitTarget.normal.x * hitTarget.scale[0];
+                    py = hitTarget.voxel.y + hitTarget.normal.y * hitTarget.scale[1];
+                    pz = hitTarget.voxel.z + hitTarget.normal.z * hitTarget.scale[2];
+                }
             } else {
                 px = hitTarget.position.x;
                 py = hitTarget.position.y;
                 pz = hitTarget.position.z;
             }
-            queryCellDebugInfo(px, py, pz);
+            const layerName = hitTarget.layerName || '';
+            queryCellDebugInfo(px, py, pz, layerName);
         }
         return;
     }
@@ -856,7 +968,9 @@ async function reloadMapFromServer(silent = false) {
     
     // 如果是静默被动拉取，我们只查询当前缓存的地图（不触发底层磁盘重新加载服务）
     // 如果是主动加载，我们调用 load_map 触发底层地图包的完整载入服务
-    const url = silent ? '/api/get_current_map' : '/api/load_map';
+    const activeLayers = getActiveRequestedLayers();
+    const queryStr = (silent && activeLayers.length > 0) ? `?layers=${activeLayers.join(',')}` : '';
+    const url = silent ? `/api/get_current_map${queryStr}` : '/api/load_map';
     const method = silent ? 'GET' : 'POST';
     
     const req = {
@@ -877,11 +991,15 @@ async function reloadMapFromServer(silent = false) {
         if (!res.ok) throw new Error((await res.json()).detail || "获取地图数据失败");
         const data = await res.json();
         
-        // 恢复数据（传入对应的地图分辨率尺度）
-        if (data.layers.occupied) layers.occupied.loadFromArray(data.layers.occupied.points, data.layers.occupied.scale);
-        if (data.layers.preblocked) layers.preblocked.loadFromArray(data.layers.preblocked.points, data.layers.preblocked.scale);
-        if (data.layers.traversable) layers.traversable.loadFromArray(data.layers.traversable.points, data.layers.traversable.scale);
-        if (data.layers.risk_cost) layers.risk_cost.loadFromArray(data.layers.risk_cost.points, data.layers.risk_cost.scale, data.layers.risk_cost.intensities);
+        // 恢复数据（传入对应的地图分辨率尺度与多尺寸节点组）
+        if (data.layers.occupied) layers.occupied.loadFromArray(data.layers.occupied.points, data.layers.occupied.scale, null, data.layers.occupied.groups);
+        if (data.layers.preblocked) layers.preblocked.loadFromArray(data.layers.preblocked.points, data.layers.preblocked.scale, null, data.layers.preblocked.groups);
+        if (data.layers.traversable) layers.traversable.loadFromArray(data.layers.traversable.points, data.layers.traversable.scale, null, data.layers.traversable.groups);
+        if (data.layers.risk_cost) layers.risk_cost.loadFromArray(data.layers.risk_cost.points, data.layers.risk_cost.scale, data.layers.risk_cost.intensities, data.layers.risk_cost.groups);
+        if (data.layers.local_octomap) layers.local_octomap.loadFromArray(data.layers.local_octomap.points, data.layers.local_octomap.scale, null, data.layers.local_octomap.groups);
+        if (data.layers.fused_octomap) layers.fused_octomap.loadFromArray(data.layers.fused_octomap.points, data.layers.fused_octomap.scale, null, data.layers.fused_octomap.groups);
+        if (data.layers.emergency_stop_free) layers.emergency_stop_free.loadFromArray(data.layers.emergency_stop_free.points, data.layers.emergency_stop_free.scale, null, data.layers.emergency_stop_free.groups);
+        if (data.layers.emergency_stop_occupied) layers.emergency_stop_occupied.loadFromArray(data.layers.emergency_stop_occupied.points, data.layers.emergency_stop_occupied.scale, null, data.layers.emergency_stop_occupied.groups);
         
         const sizeOcc = data.layers.occupied ? data.layers.occupied.points.length : 0;
         const sizePre = data.layers.preblocked ? data.layers.preblocked.points.length : 0;
@@ -1045,7 +1163,8 @@ if (btnCopyDebug) {
 - 禁行代价 (Preblocked Cost): ${latestDebugData.preblocked_cost.toFixed(3)}
 - 风险代价 (Risk Cost): ${latestDebugData.risk_cost.toFixed(3)}
 - 是否为候选点 (Is Candidate): ${latestDebugData.is_candidate ? "是" : "否"}
-- 可通行列表中 (Is Traversable): ${latestDebugData.is_traversable ? "是" : "否"}`;
+- 可通行列表中 (Is Traversable): ${latestDebugData.is_traversable ? "是" : "否"}
+- 八叉树节点诊断 (Node Source): ${latestDebugData.node_source_info || "无"}`;
 
         try {
             await navigator.clipboard.writeText(report);

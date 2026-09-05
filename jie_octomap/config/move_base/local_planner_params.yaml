@@ -9,7 +9,7 @@ OctoLocalPlanner:
 
   # Path tracking geometry
   lookahead_distance: 1.00
-  robot_center_offset_frame: odin1_base_link
+  robot_center_offset_frame: base_link
   robot_center_offset_x: 0.0
   robot_center_offset_y: 0.0
   robot_center_offset_z: 0.0
@@ -46,7 +46,7 @@ OctoLocalPlanner:
 D1LocalPlanner:
   # Path tracking geometry
   lookahead_distance: 1.00
-  robot_center_offset_frame: odin1_base_link
+  robot_center_offset_frame: base_link
   robot_center_offset_x: 0.0
   robot_center_offset_y: 0.0
   robot_center_offset_z: 0.0

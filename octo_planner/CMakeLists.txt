@@ -135,6 +135,16 @@ add_executable(pointcloud_roi_crop_node src/pointcloud_roi_crop_node.cpp)
 target_link_libraries(pointcloud_roi_crop_node ${catkin_LIBRARIES})
 add_dependencies(pointcloud_roi_crop_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
+# ---- octomap_roi_merger_node ----
+add_executable(octomap_roi_merger_node src/octomap_roi_merger_node.cpp)
+target_link_libraries(octomap_roi_merger_node ${catkin_LIBRARIES} ${OCTOMAP_LIBRARIES})
+add_dependencies(octomap_roi_merger_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+# ---- inspect_phantom_fusion_node ----
+add_executable(inspect_phantom_fusion_node src/inspect_phantom_fusion_node.cpp)
+target_link_libraries(inspect_phantom_fusion_node ${catkin_LIBRARIES} ${OCTOMAP_LIBRARIES})
+add_dependencies(inspect_phantom_fusion_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
 install(TARGETS
   octo_planner_core
   octo_global_planner_plugin
@@ -144,6 +154,8 @@ install(TARGETS
   d1_controller
   test_map_to_odom_tf_node
   pointcloud_roi_crop_node
+  octomap_roi_merger_node
+  inspect_phantom_fusion_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

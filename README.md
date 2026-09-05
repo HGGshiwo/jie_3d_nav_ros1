@@ -1,5 +1,10 @@
 # jie_3d_nav_ros1
 
+**NOTE**：
+1. 需要保证map -> base_link的tf变换（可以在launch中配置实际的坐标系）
+
+
+
 一套基于 ROS 1 Noetic 的 3D 导航 system，通过 Web 界面交互。本项目基于原 ROS 2 版本 [6-robot/jie_3d_nav](https://github.com/6-robot/jie_3d_nav) 迁移完成。本系统已在智元科技 D1 机器狗以及留形科技 Odin 1 空间定位模组上测试通过。
 
 ## 依赖包安装 (Ubuntu 20.04 ROS 1 Noetic 版本)

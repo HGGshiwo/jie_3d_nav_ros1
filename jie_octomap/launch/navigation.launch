@@ -5,8 +5,8 @@
     <!-- 全局 3D Octomap 地图获取方式配置：
          1. global_octomap_path 不为空时，启动 map_package_manager 加载离线地图包
          2. global_octomap_path 为空时，启动 occupancy_grid_to_octomap 将 2D 地图转换发布 -->
-    <arg name="global_octomap_path" default="/home/hggshiwo/catkin_3dnavi/map-segment/" />
-    <arg name="map_topic" default="/map" />
+    <arg name="global_octomap_path" default="/home/hggshiwo/catkin_ws/octomap" />
+    <arg name="map_topic" default="" />
     <arg name="use_rviz" default="true" />
 
     <!-- 设置为 true 时，网页上手动设置起点会自动广播 map -> base_footprint 的伪 TF 变换（用于无定位硬件调试） -->
@@ -20,8 +20,8 @@
         <param name="occupied_marker_topic" value="/octomap_global_markers" />
     </node>
 
-    <!-- Case B: 无静态包时，自动将 2D 栅格地图转换为 3D 全局 Octomap -->
-    <node if="$(eval arg('global_octomap_path') == '')" pkg="jie_octomap" type="occupancy_grid_to_octomap_node" name="occupancy_grid_to_octomap" output="screen">
+    <!-- Case B: 无静态包时，自动将 2D 栅格地图转换为 3D 全局 Octomap (已禁用，防止产生 2D 栅格拉伸幽灵体素) -->
+    <!-- <node if="$(eval arg('global_octomap_path') == '')" pkg="jie_octomap" type="occupancy_grid_to_octomap_node" name="occupancy_grid_to_octomap" output="screen">
         <param name="grid_topic" value="$(arg map_topic)" />
         <param name="octomap_topic" value="/octomap_global" />
         <param name="frame_id" value="map" />
@@ -29,6 +29,16 @@
         <param name="wall_height_m" value="1.0" />
         <param name="floor_z_m" value="0.0" />
         <param name="occupied_threshold" value="50" />
+    </node> -->
+
+    <!-- 2.0 点云前端 ROI 局部裁剪节点 -->
+    <node pkg="octo_planner" type="pointcloud_roi_crop_node" name="pointcloud_roi_crop" output="screen">
+        <param name="input_cloud_topic" value="$(arg point_cloud_topic)" />
+        <param name="output_cloud_topic" value="/cloud_cropped" />
+        <param name="odom_topic" value="/loc_base" />
+        <param name="crop_radius_xy" value="3.0" />
+        <param name="crop_height_above" value="2.0" />
+        <param name="crop_height_below" value="1.0" />
     </node>
 
     <!-- 2. 局部动态点云 Octomap 生成节点 -->
@@ -36,15 +46,28 @@
         <param name="resolution" value="0.10" />
         <param name="frame_id" type="string" value="map" />
         <param name="sensor_model/max_range" value="5.0" />
-        <param name="filter_ground" value="true" />
-        <remap from="cloud_in" to="$(arg point_cloud_topic)" />
+        <param name="filter_ground" value="false" />
+        <remap from="cloud_in" to="/cloud_cropped" />
         <remap from="octomap_binary" to="/octomap_local" />
+    </node>
+
+    <!-- 2.1 全局地图 ROI 裁剪与局部 Octomap 融合节点 -->
+    <node pkg="octo_planner" type="octomap_roi_merger_node" name="octomap_roi_merger" output="screen">
+        <param name="global_octomap_topic" value="/octomap_global" />
+        <param name="local_octomap_topic" value="/octomap_local" />
+        <param name="fused_octomap_topic" value="/octomap_fused" />
+        <param name="odom_topic" value="/loc_base" />
+        <param name="target_frame" value="map" />
+        <param name="crop_radius_xy" value="3.0" />
+        <param name="crop_height_above" value="2.0" />
+        <param name="crop_height_below" value="1.0" />
     </node>
 
     <!-- 3. 包含纯粹的 move_base 导航规划节点 -->
     <include file="$(find jie_octomap)/launch/move_base.launch">
         <arg name="point_cloud_topic" value="$(arg point_cloud_topic)"/>
         <arg name="global_octomap_topic" value="/octomap_global"/>
+        <arg name="fused_octomap_topic" value="/octomap_fused"/>
     </include>
 
     <!-- 4. 辅助节点：TF 广播、Marker 转换、Web 服务器与 RViz -->
@@ -53,14 +76,22 @@
         <param name="marker_topic" value="/octomap_global_markers" />
     </node>
 
-    <node if="$(arg use_rviz)" pkg="jie_octomap" type="octomap_to_occupied_markers_node" name="local_octomap_markers" output="screen">
+    <node pkg="jie_octomap" type="octomap_to_occupied_markers_node" name="local_octomap_markers" output="screen">
         <param name="octomap_topic" value="/octomap_local" />
         <param name="marker_topic" value="/octomap_local_markers" />
+    </node>
+
+    <node pkg="jie_octomap" type="octomap_to_occupied_markers_node" name="fused_octomap_markers" output="screen">
+        <param name="octomap_topic" value="/octomap_fused" />
+        <param name="marker_topic" value="/octomap_fused_markers" />
     </node>
 
     <!-- Map Viewer Web Server (FastAPI) -->
     <node pkg="jie_octomap" type="map_viewer_server" name="map_viewer_server" output="screen">
         <param name="occupied_marker_topic" value="/octomap_global_markers" />
+        <param name="octomap_local_topic" value="/octomap_local_markers" />
+        <param name="octomap_fused_topic" value="/octomap_fused_markers" />
+        <param name="emergency_stop_topic" value="/move_base/OctoLocalPlanner/emergency_stop_markers" />
         <param name="traversable_marker_topic" value="/move_base/traversable_cells" />
         <param name="preblocked_marker_topic" value="/move_base/preblocked_cells" />
         <param name="risk_cost_topic" value="/move_base/risk_cost_cloud" />
@@ -70,10 +101,6 @@
     </node>
 
     <!-- RViz 可视化界面 -->
-    <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(find jie_octomap)/config/rviz/go2.rviz" required="true" />
+    <!-- <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(find jie_octomap)/config/rviz/go2.rviz" required="true" /> -->
 
-    <!-- 用于获取调试节点的  -->
-    <node pkg="octo_planner" type="jie_path_node" name="jie_path_node" output="screen">
-        <param name="octomap_topic" value="/octomap_global"/>
-    </node>
 </launch>

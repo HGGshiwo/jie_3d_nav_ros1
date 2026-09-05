@@ -80,6 +80,7 @@ struct CellDebugDetails
   double risk_cost = 0.0;
   bool is_candidate = false;
   bool is_traversable = false;
+  std::string node_source_info;
 };
 
 class OctoPlannerCore

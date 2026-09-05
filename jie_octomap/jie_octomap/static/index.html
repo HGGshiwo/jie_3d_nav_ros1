@@ -70,7 +70,8 @@
             <label><input type="radio" name="tool" value="eraser"> 橡皮擦</label>
             <label><input type="radio" name="tool" value="start"> 设起点</label>
             <label><input type="radio" name="tool" value="goal"> 设终点</label>
-            <label><input type="radio" name="tool" value="debug"> 调试模式</label>
+            <label><input type="radio" name="tool" value="debug"> 调试体素</label>
+            <label><input type="radio" name="tool" value="debug_air"> 调试空网格</label>
         </div>
         <div class="row">
             <span>目标图层:</span>
@@ -91,6 +92,9 @@
             <label><input type="checkbox" id="show-preblocked" checked> 禁行(红)</label>
             <label><input type="checkbox" id="show-traversable"> 可通行(绿)</label>
             <label><input type="checkbox" id="show-risk-cost"> 通行代价(渐变)</label>
+            <label><input type="checkbox" id="show-octomap-local"> 局部Octomap(青)</label>
+            <label><input type="checkbox" id="show-octomap-fused"> 融合Octomap(紫)</label>
+            <label><input type="checkbox" id="show-emergency-stop"> 紧急制动探针</label>
             <label><input type="checkbox" id="show-robot" checked> 狗定位(蓝)</label>
         </div>
         <button id="btn-focus-robot" class="btn-sync" style="background:#009688;">视角对准机器人</button>
@@ -114,6 +118,7 @@
         <div class="row"><span>风险代价 (Risk Cost):</span> <span id="debug-risk-cost">-</span></div>
         <div class="row"><span>是否为候选点 (Is Candidate):</span> <span id="debug-candidate">-</span></div>
         <div class="row"><span>可通行列表中 (Is Traversable):</span> <span id="debug-traversable">-</span></div>
+        <div class="row"><span>八叉树节点诊断:</span> <span id="debug-node-source" style="font-size:11px; word-break:break-all; color:#ffeb3b;">-</span></div>
         <hr style="border-color: #444; margin: 10px 0;">
         <button id="btn-copy-debug" style="width: 100%; background: #2196F3; margin-top: 5px;">一键复制诊断信息</button>
     </div>

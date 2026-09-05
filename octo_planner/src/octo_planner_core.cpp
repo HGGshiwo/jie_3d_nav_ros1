@@ -1,4 +1,6 @@
 #include "octo_planner/octo_planner_core.h"
+#include <sstream>
+#include <iomanip>
 
 namespace octo_planner
 {
@@ -1053,6 +1055,26 @@ bool OctoPlannerCore::queryCellDebugInfo(const GridIndex & idx, CellDebugDetails
   const octomap::OcTreeNode * node = octree_->search(p);
   details.is_unknown = (node == nullptr);
   details.is_occupied = (node && octree_->isNodeOccupied(node));
+  
+  if (node) {
+    double size = octree_->getResolution();
+    for (octomap::OcTree::leaf_bbx_iterator it = octree_->begin_leafs_bbx(p, p), end = octree_->end_leafs_bbx(); it != end; ++it) {
+      size = it.getSize();
+      break;
+    }
+    const bool occ = octree_->isNodeOccupied(node);
+    const float log_odds = node->getLogOdds();
+    
+    std::ostringstream ss;
+    ss << "占据状态=" << (occ ? "占据(Occupied)" : "空闲(Free)")
+       << ", 体素尺寸=" << std::fixed << std::setprecision(2) << size << "m"
+       << ", LogOdds=" << std::setprecision(3) << log_odds
+       << ", 探测点=[" << std::setprecision(3) << p.x() << "," << p.y() << "," << p.z() << "]";
+    details.node_source_info = ss.str();
+  } else {
+    details.node_source_info = "未知/未映射区域 (Unknown/Unmapped Space), 坐标点 [" + 
+                               std::to_string(p.x()) + "," + std::to_string(p.y()) + "," + std::to_string(p.z()) + "] 未在八叉树内存中分配节点";
+  }
   
   if (preblocked_cells_.find(idx) != preblocked_cells_.end()) {
     details.is_preblocked = true;

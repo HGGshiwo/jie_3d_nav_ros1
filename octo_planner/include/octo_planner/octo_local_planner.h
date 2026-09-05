@@ -87,6 +87,7 @@ private:
   ros::NodeHandle nh_;
   ros::Subscriber octomap_sub_;
   ros::Publisher status_pub_;
+  ros::Publisher emergency_stop_pub_;
 
   // Planner Components
   OctoPlannerCore planner_;
@@ -109,6 +110,8 @@ private:
   double max_linear_speed_, max_lateral_speed_, max_angular_speed_;
   bool   align_final_yaw_;
   double linear_deadband_, lateral_deadband_, angular_deadband_;
+  bool   enable_emergency_stop_check_;
+  int    emergency_stop_min_occupied_voxels_;
 
   double robot_radius_;
   bool require_ground_support_;

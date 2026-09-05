@@ -90,5 +90,10 @@ bool JiePathNode::handleQueryCellDebugInfo(
   res.risk_cost = details.risk_cost;
   res.is_candidate = details.is_candidate;
   res.is_traversable = details.is_traversable;
+  if (!req.layer_name.empty()) {
+    res.node_source_info = "[点击图层: " + req.layer_name + "] " + details.node_source_info;
+  } else {
+    res.node_source_info = details.node_source_info;
+  }
   return true;
 }

@@ -84,6 +84,22 @@ function getVoxelColor(layerName, z, minZ, maxZ) {
         const s = 1.0;
         const l = 0.3 + ratio * 0.35;
         color.setHSL(h, s, l);
+    } else if (layerName === 'local_octomap') {
+        // Cyan / Sky Blue gradient
+        const h = (190 + ratio * 30) / 360;
+        const s = 0.85;
+        const l = 0.4 + ratio * 0.3;
+        color.setHSL(h, s, l);
+    } else if (layerName === 'fused_octomap') {
+        // Purple / Magenta gradient
+        const h = (270 + ratio * 30) / 360;
+        const s = 0.85;
+        const l = 0.4 + ratio * 0.3;
+        color.setHSL(h, s, l);
+    } else if (layerName === 'emergency_stop_free') {
+        color.setHex(0x00ff44);
+    } else if (layerName === 'emergency_stop_occupied') {
+        color.setHex(0xff0033);
     } else { // traversable (green gradient)
         const h = (100 + ratio * 40) / 360;
         const s = 0.8;
@@ -104,8 +120,8 @@ export class LayerManager {
         this.voxelMap = new Map(); // key: "x,y,z", value: {x,y,z}
         this.voxelList = []; // flat array for O(1) query by instanceId
         
-        // Use a slightly smaller BoxGeometry to create a physical gap (0.92 instead of 0.95)
-        const geometry = new THREE.BoxGeometry(0.92, 0.92, 0.92);
+        // Use unit BoxGeometry (0.98 scale for clean cell border outline)
+        const geometry = new THREE.BoxGeometry(0.98, 0.98, 0.98);
         
         // Expand bounding volume to prevent early frustum culling during raycast
         geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 99999);
@@ -139,7 +155,7 @@ export class LayerManager {
     addVoxel(x, y, z) {
         const key = this.hash(x, y, z);
         if (!this.voxelMap.has(key) && this.voxelMap.size < MAX_INSTANCES) {
-            this.voxelMap.set(key, {x, y, z});
+            this.voxelMap.set(key, {x, y, z, scale: this.scale});
             this.updateInstancedMesh();
             return true;
         }
@@ -178,7 +194,8 @@ export class LayerManager {
             this.voxelList.push(pos);
             if (i < MAX_INSTANCES) {
                 this.dummy.position.set(pos.x, pos.y, pos.z);
-                this.dummy.scale.set(this.scale[0], this.scale[1], this.scale[2]);
+                const s = pos.scale || this.scale;
+                this.dummy.scale.set(s[0], s[1], s[2]);
                 this.dummy.updateMatrix();
                 this.mesh.setMatrixAt(i, this.dummy.matrix);
                 
@@ -202,20 +219,38 @@ export class LayerManager {
         }
     }
 
-    loadFromArray(points, scale, intensities) {
+    loadFromArray(points, scale, intensities, groups) {
         if (scale) {
             this.scale = scale;
         }
         this.voxelMap.clear();
-        points.forEach((pt, idx) => {
-            const val = (intensities && intensities[idx] !== undefined) ? intensities[idx] : 0;
-            this.voxelMap.set(this.hash(pt[0], pt[1], pt[2]), {
-                x: pt[0], 
-                y: pt[1], 
-                z: pt[2],
-                intensity: val
+        if (groups && groups.length > 0) {
+            groups.forEach(group => {
+                const grpScale = group.scale || this.scale || [0.1, 0.1, 0.1];
+                const pts = group.points || [];
+                pts.forEach(pt => {
+                    this.voxelMap.set(this.hash(pt[0], pt[1], pt[2]), {
+                        x: pt[0],
+                        y: pt[1],
+                        z: pt[2],
+                        scale: grpScale
+                    });
+                });
             });
-        });
+            console.log(`[LayerManager:${this.layerName}] Loaded ${groups.length} multi-scale groups, total ${this.voxelMap.size} voxels.`);
+        } else if (points) {
+            points.forEach((pt, idx) => {
+                const val = (intensities && intensities[idx] !== undefined) ? intensities[idx] : 0;
+                this.voxelMap.set(this.hash(pt[0], pt[1], pt[2]), {
+                    x: pt[0], 
+                    y: pt[1], 
+                    z: pt[2],
+                    scale: this.scale,
+                    intensity: val
+                });
+            });
+            console.log(`[LayerManager:${this.layerName}] Loaded legacy single-scale ${this.voxelMap.size} voxels with scale ${JSON.stringify(this.scale)}.`);
+        }
         this.updateInstancedMesh();
     }
     

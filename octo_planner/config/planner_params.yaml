@@ -20,3 +20,7 @@ corner_fillet_radius: 0.30
 enable_continuous_yaw: true
 yaw_smoothing_window: 5
 
+# Emergency stop parameters
+enable_emergency_stop_check: true
+emergency_stop_min_occupied_voxels: 3
+

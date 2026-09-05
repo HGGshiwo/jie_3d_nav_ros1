@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import rospy
 import tf2_ros
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point, PointStamped, PoseStamped, TransformStamped
 from nav_msgs.msg import Path as ROSPath, Odometry
 from move_base_msgs.msg import MoveBaseActionGoal
@@ -57,7 +57,11 @@ latest_ros_data = {
     "occupied": None,
     "preblocked": None,
     "traversable": None,
-    "risk_cost": None
+    "risk_cost": None,
+    "local_octomap": None,
+    "fused_octomap": None,
+    "emergency_stop_free": None,
+    "emergency_stop_occupied": None
 }
 # 全局存储最新规划好的路径点
 latest_planned_path = []
@@ -87,30 +91,81 @@ def path_callback(msg):
         points.append([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
     latest_planned_path = points
 
+def parse_marker_or_array(msg):
+    groups = []
+    stamp = getattr(msg, 'header', None).stamp if hasattr(msg, 'header') else None
+    if isinstance(msg, MarkerArray):
+        for m in msg.markers:
+            if m.type == Marker.CUBE_LIST and m.action == Marker.ADD:
+                pts = [[p.x, p.y, p.z] for p in m.points]
+                sc = [m.scale.x, m.scale.y, m.scale.z] if m.scale.x > 0 else [0.1, 0.1, 0.1]
+                if pts:
+                    groups.append({"points": pts, "scale": sc})
+                if stamp is None and hasattr(m, 'header'):
+                    stamp = m.header.stamp
+    elif isinstance(msg, Marker):
+        if msg.type == Marker.CUBE_LIST and msg.action == Marker.ADD:
+            pts = [[p.x, p.y, p.z] for p in msg.points]
+            sc = [msg.scale.x, msg.scale.y, msg.scale.z] if msg.scale.x > 0 else [0.1, 0.1, 0.1]
+            if pts:
+                groups.append({"points": pts, "scale": sc})
+            if stamp is None and hasattr(msg, 'header'):
+                stamp = msg.header.stamp
+
+    all_pts = []
+    first_scale = [0.1, 0.1, 0.1]
+    if groups:
+        first_scale = groups[0]["scale"]
+        for g in groups:
+            all_pts.extend(g["points"])
+
+    return {
+        "groups": groups,
+        "points": all_pts,
+        "scale": first_scale,
+        "stamp": stamp if stamp is not None else rospy.Time(0)
+    }
+
 def occupied_callback(msg):
     global occupied_version
-    if msg.type == Marker.CUBE_LIST:
-        pts = [[p.x, p.y, p.z] for p in msg.points]
-        scale = [msg.scale.x, msg.scale.y, msg.scale.z]
-        latest_ros_data["occupied"] = {"points": pts, "scale": scale, "stamp": msg.header.stamp}
+    parsed = parse_marker_or_array(msg)
+    if parsed["groups"]:
+        latest_ros_data["occupied"] = parsed
         occupied_version += 1
-        print(f"[occupied_callback] Received occupied marker. Points={len(pts)} Stamp={msg.header.stamp.to_sec()} Version={occupied_version}", flush=True)
+        print(f"[occupied_callback] Received occupied marker/array. Groups={len(parsed['groups'])} TotalPts={len(parsed['points'])} Version={occupied_version}", flush=True)
 
 def preblocked_callback(msg):
     global preblocked_version
-    if msg.type == Marker.CUBE_LIST:
-        pts = [[p.x, p.y, p.z] for p in msg.points]
-        scale = [msg.scale.x, msg.scale.y, msg.scale.z]
-        latest_ros_data["preblocked"] = {"points": pts, "scale": scale, "stamp": msg.header.stamp}
+    parsed = parse_marker_or_array(msg)
+    if parsed["groups"]:
+        latest_ros_data["preblocked"] = parsed
         preblocked_version += 1
-        print(f"[preblocked_callback] Received preblocked marker. Points={len(pts)} Stamp={msg.header.stamp.to_sec()} Version={preblocked_version}", flush=True)
+        print(f"[preblocked_callback] Received preblocked marker. Points={len(parsed['points'])} Stamp={parsed['stamp'].to_sec()} Version={preblocked_version}", flush=True)
 
 def traversable_callback(msg):
-    if msg.type == Marker.CUBE_LIST:
-        pts = [[p.x, p.y, p.z] for p in msg.points]
-        scale = [msg.scale.x, msg.scale.y, msg.scale.z]
-        latest_ros_data["traversable"] = {"points": pts, "scale": scale, "stamp": msg.header.stamp}
-        print(f"[traversable_callback] Received traversable marker. Points={len(pts)} Stamp={msg.header.stamp.to_sec()}", flush=True)
+    parsed = parse_marker_or_array(msg)
+    if parsed["groups"]:
+        latest_ros_data["traversable"] = parsed
+        print(f"[traversable_callback] Received traversable marker. Points={len(parsed['points'])} Stamp={parsed['stamp'].to_sec()}", flush=True)
+
+def local_octomap_callback(msg):
+    parsed = parse_marker_or_array(msg)
+    if parsed["groups"]:
+        latest_ros_data["local_octomap"] = parsed
+
+def fused_octomap_callback(msg):
+    parsed = parse_marker_or_array(msg)
+    if parsed["groups"]:
+        latest_ros_data["fused_octomap"] = parsed
+
+def emergency_stop_callback(msg):
+    for m in msg.markers:
+        pts = [[p.x, p.y, p.z] for p in m.points] if m.action == Marker.ADD else []
+        scale = [m.scale.x, m.scale.y, m.scale.z] if m.scale.x > 0 else [0.06, 0.06, 0.06]
+        if m.ns == "emergency_stop_free" or m.id == 0:
+            latest_ros_data["emergency_stop_free"] = {"points": pts, "scale": scale, "stamp": m.header.stamp}
+        elif m.ns == "emergency_stop_occupied" or m.id == 1:
+            latest_ros_data["emergency_stop_occupied"] = {"points": pts, "scale": scale, "stamp": m.header.stamp}
 
 def risk_cost_callback(msg):
     try:
@@ -199,6 +254,9 @@ def startup_event():
         preblocked_topic = rospy.get_param("~preblocked_marker_topic", "/move_base/preblocked_cells")
         traversable_topic = rospy.get_param("~traversable_marker_topic", "/move_base/traversable_cells")
         risk_cost_topic = rospy.get_param("~risk_cost_topic", "/move_base/risk_cost_cloud")
+        octomap_local_topic = rospy.get_param("~octomap_local_topic", "/octomap_local_markers")
+        octomap_fused_topic = rospy.get_param("~octomap_fused_topic", "/octomap_fused_markers")
+        emergency_stop_topic = rospy.get_param("~emergency_stop_topic", "/move_base/OctoLocalPlanner/emergency_stop_markers")
         path_topic = rospy.get_param("~path_topic", "/move_base/plan")
         odom_topic = rospy.get_param("~odom_topic", "/loc_base")
         status_text_topic = rospy.get_param("~status_text_topic", "/move_base/status_text")
@@ -215,10 +273,13 @@ def startup_event():
                 fake_robot_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
             rospy.Timer(rospy.Duration(0.05), publish_fake_tf_loop)
         
-        rospy.Subscriber(occupied_topic, Marker, occupied_callback)
+        rospy.Subscriber(occupied_topic, MarkerArray, occupied_callback)
         rospy.Subscriber(preblocked_topic, Marker, preblocked_callback)
         rospy.Subscriber(traversable_topic, Marker, traversable_callback)
         rospy.Subscriber(risk_cost_topic, PointCloud2, risk_cost_callback)
+        rospy.Subscriber(octomap_local_topic, MarkerArray, local_octomap_callback)
+        rospy.Subscriber(octomap_fused_topic, MarkerArray, fused_octomap_callback)
+        rospy.Subscriber(emergency_stop_topic, MarkerArray, emergency_stop_callback)
         rospy.Subscriber(path_topic, ROSPath, path_callback)
         rospy.Subscriber(odom_topic, Odometry, odom_callback)
         rospy.Subscriber(status_text_topic, String, status_text_callback)
@@ -325,23 +386,38 @@ async def load_map(req: MapDataRequest):
         if latest_ros_data["occupied"] is not None:
             response_data["layers"]["occupied"] = {
                 "points": latest_ros_data["occupied"]["points"],
-                "scale": latest_ros_data["occupied"]["scale"]
+                "scale": latest_ros_data["occupied"]["scale"],
+                "groups": latest_ros_data["occupied"].get("groups", [])
             }
         if latest_ros_data["preblocked"] is not None:
             response_data["layers"]["preblocked"] = {
                 "points": latest_ros_data["preblocked"]["points"],
-                "scale": latest_ros_data["preblocked"]["scale"]
+                "scale": latest_ros_data["preblocked"]["scale"],
+                "groups": latest_ros_data["preblocked"].get("groups", [])
             }
         if latest_ros_data["traversable"] is not None:
             response_data["layers"]["traversable"] = {
                 "points": latest_ros_data["traversable"]["points"],
-                "scale": latest_ros_data["traversable"]["scale"]
+                "scale": latest_ros_data["traversable"]["scale"],
+                "groups": latest_ros_data["traversable"].get("groups", [])
             }
         if latest_ros_data["risk_cost"] is not None:
             response_data["layers"]["risk_cost"] = {
                 "points": latest_ros_data["risk_cost"]["points"],
                 "intensities": latest_ros_data["risk_cost"]["intensities"],
                 "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
+            }
+        if latest_ros_data["local_octomap"] is not None:
+            response_data["layers"]["local_octomap"] = {
+                "points": latest_ros_data["local_octomap"]["points"],
+                "scale": latest_ros_data["local_octomap"]["scale"],
+                "groups": latest_ros_data["local_octomap"].get("groups", [])
+            }
+        if latest_ros_data["fused_octomap"] is not None:
+            response_data["layers"]["fused_octomap"] = {
+                "points": latest_ros_data["fused_octomap"]["points"],
+                "scale": latest_ros_data["fused_octomap"]["scale"],
+                "groups": latest_ros_data["fused_octomap"].get("groups", [])
             }
 
         # Fallback: 如果没有通过 ROS 话题收到 occupied（或 ROS 未开启），直接读取 NPZ 文件作为保底
@@ -354,9 +430,12 @@ async def load_map(req: MapDataRequest):
                     pts_key = f"{layer_name}_points"
                     sc_key = f"{layer_name}_scale"
                     if pts_key in layers_data and layer_name not in response_data["layers"]:
+                        pts_list = layers_data[pts_key].tolist()
+                        sc_list = layers_data[sc_key].tolist() if sc_key in layers_data else [0.2, 0.2, 0.2]
                         response_data["layers"][layer_name] = {
-                            "points": layers_data[pts_key].tolist(),
-                            "scale": layers_data[sc_key].tolist() if sc_key in layers_data else [0.2, 0.2, 0.2]
+                            "points": pts_list,
+                            "scale": sc_list,
+                            "groups": [{"points": pts_list, "scale": sc_list}] if pts_list else []
                         }
                 if "risk_points" in layers_data and "risk_intensity" in layers_data and "risk_cost" not in response_data["layers"]:
                     scale = layers_data["preblocked_scale"].tolist() if "preblocked_scale" in layers_data else [0.2, 0.2, 0.2]
@@ -552,6 +631,7 @@ class PointRequest(BaseModel):
     x: float
     y: float
     z: float
+    layer_name: Optional[str] = ""
 
 @app.post("/api/set_start")
 async def set_start(req: PointRequest):
@@ -751,16 +831,23 @@ async def get_robot_pose():
 
 @app.post("/api/debug_cell")
 async def debug_cell(req: PointRequest):
-    service_name = "/jie_path_node/query_cell_debug_info"
+    service_name = "/octomap_roi_merger/query_cell_debug_info"
     try:
         service_name = rospy.get_param("~query_cell_debug_service", service_name)
     except Exception:
         pass
     try:
         def call_service():
-            rospy.wait_for_service(service_name, timeout=1.5)
+            try:
+                rospy.wait_for_service(service_name, timeout=1.0)
+            except Exception:
+                # Fallback to jie_path_node service if merger node service is unavailable
+                fallback_name = "/jie_path_node/query_cell_debug_info"
+                rospy.wait_for_service(fallback_name, timeout=1.0)
+                query_service = rospy.ServiceProxy(fallback_name, QueryCellDebugInfo)
+                return query_service(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or ""))
             query_service = rospy.ServiceProxy(service_name, QueryCellDebugInfo)
-            return query_service(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z))
+            return query_service(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or ""))
         resp = await run_in_thread(call_service)
         if not resp.success:
             return {"status": "error", "message": resp.message}
@@ -780,7 +867,8 @@ async def debug_cell(req: PointRequest):
             "preblocked_cost": resp.preblocked_cost,
             "risk_cost": resp.risk_cost,
             "is_candidate": resp.is_candidate,
-            "is_traversable": resp.is_traversable
+            "is_traversable": resp.is_traversable,
+            "node_source_info": getattr(resp, 'node_source_info', 'N/A')
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ROS 调试服务不可用: {e}")
@@ -790,41 +878,34 @@ async def get_map_version():
     return {"preblocked_version": preblocked_version, "occupied_version": occupied_version}
 
 @app.get("/api/get_current_map")
-async def get_current_map():
-    occ_stamp = latest_ros_data["occupied"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["occupied"] else 0.0
-    pre_stamp = latest_ros_data["preblocked"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["preblocked"] else 0.0
-    tra_stamp = latest_ros_data["traversable"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["traversable"] else 0.0
-    risk_stamp = latest_ros_data["risk_cost"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["risk_cost"] else 0.0
+async def get_current_map(layers: Optional[str] = None):
+    requested = set(layers.split(',')) if layers else None
     
-    occ_len = len(latest_ros_data["occupied"]["points"]) if latest_ros_data["occupied"] else 0
-    pre_len = len(latest_ros_data["preblocked"]["points"]) if latest_ros_data["preblocked"] else 0
-    tra_len = len(latest_ros_data["traversable"]["points"]) if latest_ros_data["traversable"] else 0
-    risk_len = len(latest_ros_data["risk_cost"]["points"]) if latest_ros_data["risk_cost"] else 0
-
-    print(f"[get_current_map] Request received. occupied(len={occ_len}, stamp={occ_stamp}), preblocked(len={pre_len}, stamp={pre_stamp}), traversable(len={tra_len}, stamp={tra_stamp}), risk_cost(len={risk_len}, stamp={risk_stamp})", flush=True)
-
     response_layers = {}
-    if latest_ros_data["occupied"] is not None:
-        response_layers["occupied"] = {
-            "points": latest_ros_data["occupied"]["points"],
-            "scale": latest_ros_data["occupied"]["scale"]
-        }
-    if latest_ros_data["preblocked"] is not None:
-        response_layers["preblocked"] = {
-            "points": latest_ros_data["preblocked"]["points"],
-            "scale": latest_ros_data["preblocked"]["scale"]
-        }
-    if latest_ros_data["traversable"] is not None:
-        response_layers["traversable"] = {
-            "points": latest_ros_data["traversable"]["points"],
-            "scale": latest_ros_data["traversable"]["scale"]
-        }
-    if latest_ros_data["risk_cost"] is not None:
-        response_layers["risk_cost"] = {
-            "points": latest_ros_data["risk_cost"]["points"],
-            "intensities": latest_ros_data["risk_cost"]["intensities"],
-            "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
-        }
+    all_supported_layers = [
+        "occupied", "preblocked", "traversable", "risk_cost",
+        "local_octomap", "fused_octomap", "emergency_stop_free", "emergency_stop_occupied"
+    ]
+    
+    for layer_name in all_supported_layers:
+        if requested is not None and layer_name not in requested:
+            continue
+        
+        data = latest_ros_data.get(layer_name)
+        if data is not None:
+            if layer_name == "risk_cost":
+                response_layers[layer_name] = {
+                    "points": data["points"],
+                    "intensities": data["intensities"],
+                    "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
+                }
+            else:
+                response_layers[layer_name] = {
+                    "points": data["points"],
+                    "scale": data["scale"],
+                    "groups": data.get("groups", [])
+                }
+                
     return JSONResponse(content={"layers": response_layers})
 
 @app.get("/api/default_map")

@@ -37,6 +37,7 @@ public:
 
   void publishTrackingPointMarker(const geometry_msgs::PoseStamped & pose);
   void publishLocalBandMarkers(const std::vector<geometry_msgs::PoseStamped> & band);
+  void publishRawLocalBandMarkers(const std::vector<geometry_msgs::PoseStamped> & band);
   void publishCellSetMarker(
     const std::unordered_set<octo_planner::GridIndex, octo_planner::GridIndexHash> & cells,
     ros::Publisher & publisher,
@@ -56,6 +57,7 @@ private:
 
   ros::Publisher marker_pub_;
   ros::Publisher band_marker_pub_;
+  ros::Publisher raw_band_marker_pub_;
   ros::Publisher traversable_marker_pub_;
   ros::Publisher preblocked_marker_pub_;
   ros::Publisher risk_cost_pub_;

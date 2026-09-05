@@ -17,6 +17,7 @@ void OctoLocalVisualizer::initialize(ros::NodeHandle & private_nh, const Visuali
   private_nh.param<std::string>("tracking_point_marker_topic", tracking_marker_topic, "tracking_point_marker");
   marker_pub_ = private_nh.advertise<visualization_msgs::Marker>(tracking_marker_topic, 1, true);
   band_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("optimized_local_band", 1, true);
+  raw_band_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("raw_local_band", 1, true);
   traversable_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("traversable_cells", 1, true);
   preblocked_marker_pub_ = private_nh.advertise<visualization_msgs::Marker>("preblocked_cells", 1, true);
   risk_cost_pub_ = private_nh.advertise<sensor_msgs::PointCloud2>("risk_cost_cloud", 1, true);
@@ -54,6 +55,25 @@ void OctoLocalVisualizer::publishLocalBandMarkers(const std::vector<geometry_msg
     marker.points.push_back(pose.pose.position);
   }
   band_marker_pub_.publish(marker);
+}
+
+void OctoLocalVisualizer::publishRawLocalBandMarkers(const std::vector<geometry_msgs::PoseStamped> & band)
+{
+  if (band.empty()) return;
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = params_.map_frame;
+  marker.header.stamp    = ros::Time::now();
+  marker.ns     = "raw_local_band";
+  marker.id     = 2;
+  marker.type   = visualization_msgs::Marker::SPHERE_LIST;
+  marker.action = visualization_msgs::Marker::ADD;
+  marker.scale.x = marker.scale.y = marker.scale.z = 0.14;
+  marker.color.r = 0.0f; marker.color.g = 0.8f; marker.color.b = 1.0f; marker.color.a = 0.95f; // Bright Cyan
+
+  for (const auto & pose : band) {
+    marker.points.push_back(pose.pose.position);
+  }
+  raw_band_marker_pub_.publish(marker);
 }
 
 void OctoLocalVisualizer::publishCellSetMarker(

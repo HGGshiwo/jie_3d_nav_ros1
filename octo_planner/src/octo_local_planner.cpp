@@ -1,4 +1,5 @@
 #include "octo_planner/octo_local_planner.h"
+#include <visualization_msgs/MarkerArray.h>
 #include <pluginlib/class_list_macros.h>
 #include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
@@ -58,6 +59,8 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   private_nh.param<double>     ("linear_deadband",              linear_deadband_,               0.05);
   private_nh.param<double>     ("lateral_deadband",             lateral_deadband_,              0.05);
   private_nh.param<double>     ("angular_deadband",             angular_deadband_,              0.05);
+  private_nh.param<bool>       ("enable_emergency_stop_check", enable_emergency_stop_check_, true);
+  private_nh.param<int>        ("emergency_stop_min_occupied_voxels", emergency_stop_min_occupied_voxels_, 3);
 
   // 3D Planner Parameters
   private_nh.param<double>("robot_radius", robot_radius_, 0.20);
@@ -126,6 +129,7 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   octomap_sub_ = nh.subscribe(octomap_topic, 1, &OctoLocalPlanner::onOctomap, this);
 
   status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
+  emergency_stop_pub_ = private_nh.advertise<visualization_msgs::MarkerArray>("emergency_stop_markers", 1);
 
   initialized_ = true;
   ROS_INFO("OctoLocalPlanner initialized with async OcTree processing & modularized architecture, sub to [%s]", octomap_topic.c_str());
@@ -279,11 +283,21 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
   // Check if current local band segment is blocked by obstacles; if so, run 3D A* local re-planning
   if (local_band.size() >= 2 && map_ready_) {
-    const auto & p_start = local_band.front().pose.position;
-    const auto & p_goal  = local_band.back().pose.position;
-    octomap::point3d pt_start(static_cast<float>(p_start.x), static_cast<float>(p_start.y), static_cast<float>(p_start.z));
-    octomap::point3d pt_goal(static_cast<float>(p_goal.x), static_cast<float>(p_goal.y), static_cast<float>(p_goal.z));
-    if (!planner_.isLineTraversable(pt_start, pt_goal)) {
+    bool is_segment_blocked = false;
+    for (size_t i = 0; i + 1 < local_band.size(); ++i) {
+      const auto & p1 = local_band[i].pose.position;
+      const auto & p2 = local_band[i + 1].pose.position;
+      octomap::point3d pt1(static_cast<float>(p1.x), static_cast<float>(p1.y), static_cast<float>(p1.z));
+      octomap::point3d pt2(static_cast<float>(p2.x), static_cast<float>(p2.y), static_cast<float>(p2.z));
+      if (!planner_.isLineTraversable(pt1, pt2)) {
+        is_segment_blocked = true;
+        break;
+      }
+    }
+
+    if (is_segment_blocked) {
+      const auto & p_start = local_band.front().pose.position;
+      const auto & p_goal  = local_band.back().pose.position;
       std::vector<GridIndex> path_cells;
       std::string error_msg;
       if (planner_.plan(p_start, p_goal, path_cells, error_msg)) {
@@ -315,6 +329,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
       }
     }
 
+    visualizer_.publishRawLocalBandMarkers(local_band);
     elastic_band_.optimize(local_band, planner_);
 
     // Temporal inter-frame low-pass filter (EMA)
@@ -386,27 +401,83 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
 
   // Emergency stop check
-  auto octree = planner_.getOctree();
-  if (octree)
+  if (enable_emergency_stop_check_)
   {
-    double check_dist = robot_radius_ + 0.15;
-    bool emergency_stop = false;
-    for (double fwd = 0.05; fwd <= check_dist; fwd += 0.08)
+    auto octree = planner_.getOctree();
+    if (octree)
     {
-      for (double lat = -robot_radius_ * 0.6; lat <= robot_radius_ * 0.6; lat += 0.08)
+      double min_fwd = robot_radius_ + 0.05;
+      double max_fwd = robot_radius_ + 0.35;
+      int occupied_count = 0;
+
+      visualization_msgs::MarkerArray marker_array;
+      visualization_msgs::Marker free_marker, occupied_marker;
+      free_marker.header.frame_id = map_frame_;
+      free_marker.header.stamp = ros::Time::now();
+      free_marker.ns = "emergency_stop_free";
+      free_marker.id = 0;
+      free_marker.type = visualization_msgs::Marker::CUBE_LIST;
+      free_marker.action = visualization_msgs::Marker::ADD;
+      free_marker.scale.x = 0.06; free_marker.scale.y = 0.06; free_marker.scale.z = 0.06;
+      free_marker.color.g = 1.0f; free_marker.color.a = 0.6f;
+      free_marker.pose.orientation.w = 1.0;
+
+      occupied_marker.header = free_marker.header;
+      occupied_marker.ns = "emergency_stop_occupied";
+      occupied_marker.id = 1;
+      occupied_marker.type = visualization_msgs::Marker::CUBE_LIST;
+      occupied_marker.action = visualization_msgs::Marker::ADD;
+      occupied_marker.scale.x = 0.10; occupied_marker.scale.y = 0.10; occupied_marker.scale.z = 0.10;
+      occupied_marker.color.r = 1.0f; occupied_marker.color.a = 0.95f;
+      occupied_marker.pose.orientation.w = 1.0;
+
+      geometry_msgs::Point first_hit_pt;
+
+      for (double fwd = min_fwd; fwd <= max_fwd; fwd += 0.08)
       {
-        double mx = robot_pose.x + std::cos(robot_pose.yaw) * fwd - std::sin(robot_pose.yaw) * lat;
-        double my = robot_pose.y + std::sin(robot_pose.yaw) * fwd + std::cos(robot_pose.yaw) * lat;
-        octomap::point3d check_p(static_cast<float>(mx), static_cast<float>(my), static_cast<float>(robot_pose.z));
-        const octomap::OcTreeNode* node = octree->search(check_p);
-        if (node && octree->isNodeOccupied(node)) { emergency_stop = true; break; }
+        for (double lat = -robot_radius_ * 0.6; lat <= robot_radius_ * 0.6; lat += 0.08)
+        {
+          double mx = robot_pose.x + std::cos(robot_pose.yaw) * fwd - std::sin(robot_pose.yaw) * lat;
+          double my = robot_pose.y + std::sin(robot_pose.yaw) * fwd + std::cos(robot_pose.yaw) * lat;
+          octomap::point3d check_p(static_cast<float>(mx), static_cast<float>(my), static_cast<float>(robot_pose.z));
+
+          geometry_msgs::Point pt;
+          pt.x = mx; pt.y = my; pt.z = robot_pose.z;
+
+          const octomap::OcTreeNode* node = octree->search(check_p);
+          if (node && octree->isNodeOccupied(node)) {
+            occupied_count++;
+            occupied_marker.points.push_back(pt);
+            if (occupied_count == 1) {
+              first_hit_pt = pt;
+            }
+          } else {
+            free_marker.points.push_back(pt);
+          }
+        }
       }
-      if (emergency_stop) break;
-    }
-    if (emergency_stop) {
-      ROS_WARN_THROTTLE(1.0, "OctoLocalPlanner: Obstacle detected right in front of robot! Stopping.");
-      velocity_smoother_.reset();
-      cmd_vel = geometry_msgs::Twist();
+
+      if (!free_marker.points.empty()) {
+        marker_array.markers.push_back(free_marker);
+      } else {
+        free_marker.action = visualization_msgs::Marker::DELETE;
+        marker_array.markers.push_back(free_marker);
+      }
+
+      if (!occupied_marker.points.empty()) {
+        marker_array.markers.push_back(occupied_marker);
+      } else {
+        occupied_marker.action = visualization_msgs::Marker::DELETE;
+        marker_array.markers.push_back(occupied_marker);
+      }
+      emergency_stop_pub_.publish(marker_array);
+
+      if (occupied_count >= emergency_stop_min_occupied_voxels_) {
+        ROS_WARN_THROTTLE(1.0, "OctoLocalPlanner: Obstacle detected in front (%d occupied voxels >= %d)! First hit at (x=%.2f, y=%.2f, z=%.2f), robot_z=%.2f. Stopping.",
+                          occupied_count, emergency_stop_min_occupied_voxels_, first_hit_pt.x, first_hit_pt.y, first_hit_pt.z, robot_pose.z);
+        velocity_smoother_.reset();
+        cmd_vel = geometry_msgs::Twist();
+      }
     }
   }
 

@@ -1,6 +1,7 @@
 float64 x
 float64 y
 float64 z
+string layer_name
 ---
 bool success
 string message
@@ -22,3 +23,4 @@ float64 preblocked_cost
 float64 risk_cost
 bool is_candidate
 bool is_traversable
+string node_source_info
