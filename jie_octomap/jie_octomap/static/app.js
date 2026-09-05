@@ -74,26 +74,32 @@ function getActiveRequestedLayers() {
     return requested;
 }
 
-// 监听复选框，切换图层显隐
+// 监听复选框，切换图层显隐并同步更新 WebSocket 订阅
 document.getElementById('show-occupied').addEventListener('change', (e) => {
     layers.occupied.mesh.visible = e.target.checked;
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 document.getElementById('show-preblocked').addEventListener('change', (e) => {
     layers.preblocked.mesh.visible = e.target.checked;
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 document.getElementById('show-traversable').addEventListener('change', (e) => {
     layers.traversable.mesh.visible = e.target.checked;
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 document.getElementById('show-risk-cost').addEventListener('change', (e) => {
     layers.risk_cost.mesh.visible = e.target.checked;
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 document.getElementById('show-octomap-local')?.addEventListener('change', (e) => {
     layers.local_octomap.mesh.visible = e.target.checked;
     if (!e.target.checked) layers.local_octomap.loadFromArray([], layers.local_octomap.scale);
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 document.getElementById('show-octomap-fused')?.addEventListener('change', (e) => {
     layers.fused_octomap.mesh.visible = e.target.checked;
     if (!e.target.checked) layers.fused_octomap.loadFromArray([], layers.fused_octomap.scale);
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 document.getElementById('show-emergency-stop')?.addEventListener('change', (e) => {
     layers.emergency_stop_free.mesh.visible = e.target.checked;
@@ -102,6 +108,7 @@ document.getElementById('show-emergency-stop')?.addEventListener('change', (e) =
         layers.emergency_stop_free.loadFromArray([], layers.emergency_stop_free.scale);
         layers.emergency_stop_occupied.loadFromArray([], layers.emergency_stop_occupied.scale);
     }
+    if (typeof sendWsSubscription === 'function') sendWsSubscription();
 });
 const showRobotEl = document.getElementById('show-robot');
 if (showRobotEl) {
@@ -543,20 +550,7 @@ function updateRobotVisual(position, orientation) {
     }
 }
 
-// 轮询获取机器狗实时定位信息（每 200ms 高频更新）
-setInterval(async () => {
-    try {
-        const res = await fetch('/api/get_robot_pose');
-        if (res.ok) {
-            const data = await res.json();
-            if (data.has_pose && data.position) {
-                updateRobotVisual(data.position, data.orientation);
-            }
-        }
-    } catch (err) {
-        // 忽略网络抖动
-    }
-}, 200);
+
 
 // 显示与隐藏全局悬浮加载提示框
 function showLoading(msg = "⏳ 正在加载地图数据，请稍候...") {
@@ -611,81 +605,112 @@ if (btnFocusRobot) {
     btnFocusRobot.addEventListener('click', focusOnRobot);
 }
 
-// 轮询获取 ROS 规划状态消息 (500ms 刷新)
-setInterval(async () => {
-    try {
-        const res = await fetch('/api/get_status_text');
-        if (res.ok) {
-            const data = await res.json();
+// ---- 4. 全双工 WebSocket 实时数据流系统 (彻底替代多路 HTTP 短轮询与 pending) ----
+const clientLayerVersions = {};
+let liveWs = null;
+
+function sendWsSubscription() {
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        liveWs.send(JSON.stringify({
+            type: "subscribe",
+            layers: getActiveRequestedLayers(),
+            versions: clientLayerVersions
+        }));
+    }
+}
+
+function initLiveWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/live`;
+    console.log("【WebSocket】正在连接实时推流通道:", wsUrl);
+    liveWs = new WebSocket(wsUrl);
+
+    liveWs.onopen = () => {
+        console.log("【WebSocket】已成功建立实时流连接");
+        sendWsSubscription();
+    };
+
+    liveWs.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+
+            // 1. 机器狗实时位姿
+            if (data.pose && data.pose.position) {
+                updateRobotVisual(data.pose.position, data.pose.orientation);
+            }
+
+            // 2. ROS 规划状态文本
             if (data.status_text && rosStatusEl) {
                 rosStatusEl.innerText = `ROS 状态: ${data.status_text}`;
             }
-        }
-    } catch (err) {
-        // 忽略网络抖动
-    }
-}, 500);
 
-// 轮询获取 ROS 规划路径数据 (500ms 刷新)
-setInterval(async () => {
-    try {
-        const res = await fetch('/api/get_path');
-        if (res.ok) {
-            const data = await res.json();
+            // 3. 规划路径更新
             if (data.path) {
                 updatePathVisual(data.path);
             }
-        }
-    } catch (err) {
-        // 忽略网络抖动
-    }
-}, 500);
 
-// 动态图层轮询（仅当在前端勾选图层时，才以 300ms 频率向后端请求对应图层数据；未勾选则完全不请求）
-setInterval(async () => {
-    const activeLayers = getActiveRequestedLayers();
-    if (activeLayers.length === 0) return;
-    
-    try {
-        const queryStr = `?layers=${activeLayers.join(',')}`;
-        const res = await fetch(`/api/get_current_map${queryStr}`);
-        if (res.ok) {
-            const data = await res.json();
+            // 4. 动态图层增量渲染
             if (data.layers) {
                 if (data.layers.local_octomap && document.getElementById('show-octomap-local')?.checked) {
-                    layers.local_octomap.loadFromArray(data.layers.local_octomap.points, data.layers.local_octomap.scale, null, data.layers.local_octomap.groups);
+                    const l = data.layers.local_octomap;
+                    if (l.version !== undefined) clientLayerVersions.local_octomap = l.version;
+                    if (!l.unchanged) layers.local_octomap.loadFast(l.groups, l.scale);
                 }
                 if (data.layers.fused_octomap && document.getElementById('show-octomap-fused')?.checked) {
-                    layers.fused_octomap.loadFromArray(data.layers.fused_octomap.points, data.layers.fused_octomap.scale, null, data.layers.fused_octomap.groups);
+                    const l = data.layers.fused_octomap;
+                    if (l.version !== undefined) clientLayerVersions.fused_octomap = l.version;
+                    if (!l.unchanged) layers.fused_octomap.loadFast(l.groups, l.scale);
                 }
                 if (document.getElementById('show-emergency-stop')?.checked) {
                     if (data.layers.emergency_stop_free) {
-                        layers.emergency_stop_free.loadFromArray(data.layers.emergency_stop_free.points, data.layers.emergency_stop_free.scale, null, data.layers.emergency_stop_free.groups);
+                        const l = data.layers.emergency_stop_free;
+                        if (l.version !== undefined) clientLayerVersions.emergency_stop_free = l.version;
+                        if (!l.unchanged) layers.emergency_stop_free.loadFast(l.groups, l.scale);
                     }
                     if (data.layers.emergency_stop_occupied) {
-                        layers.emergency_stop_occupied.loadFromArray(data.layers.emergency_stop_occupied.points, data.layers.emergency_stop_occupied.scale, null, data.layers.emergency_stop_occupied.groups);
+                        const l = data.layers.emergency_stop_occupied;
+                        if (l.version !== undefined) clientLayerVersions.emergency_stop_occupied = l.version;
+                        if (!l.unchanged) layers.emergency_stop_occupied.loadFast(l.groups, l.scale);
                     }
                 }
                 if (data.layers.traversable && document.getElementById('show-traversable')?.checked) {
-                    layers.traversable.loadFromArray(data.layers.traversable.points, data.layers.traversable.scale, null, data.layers.traversable.groups);
+                    const l = data.layers.traversable;
+                    if (l.version !== undefined) clientLayerVersions.traversable = l.version;
+                    if (!l.unchanged) layers.traversable.loadFast(l.groups, l.scale);
                 }
                 if (data.layers.risk_cost && document.getElementById('show-risk-cost')?.checked) {
-                    layers.risk_cost.loadFromArray(data.layers.risk_cost.points, data.layers.risk_cost.scale, data.layers.risk_cost.intensities, data.layers.risk_cost.groups);
+                    const l = data.layers.risk_cost;
+                    if (l.version !== undefined) clientLayerVersions.risk_cost = l.version;
+                    if (!l.unchanged) layers.risk_cost.loadFromArray(l.points, l.scale, l.intensities, l.groups);
                 }
                 if (!isDirty) {
                     if (data.layers.occupied && document.getElementById('show-occupied')?.checked) {
-                        layers.occupied.loadFromArray(data.layers.occupied.points, data.layers.occupied.scale, null, data.layers.occupied.groups);
+                        const l = data.layers.occupied;
+                        if (l.version !== undefined) clientLayerVersions.occupied = l.version;
+                        if (!l.unchanged) layers.occupied.loadFromArray(l.points, l.scale, null, l.groups);
                     }
                     if (data.layers.preblocked && document.getElementById('show-preblocked')?.checked) {
-                        layers.preblocked.loadFromArray(data.layers.preblocked.points, data.layers.preblocked.scale, null, data.layers.preblocked.groups);
+                        const l = data.layers.preblocked;
+                        if (l.version !== undefined) clientLayerVersions.preblocked = l.version;
+                        if (!l.unchanged) layers.preblocked.loadFromArray(l.points, l.scale, null, l.groups);
                     }
                 }
             }
+        } catch (e) {
+            console.error("【WebSocket】数据帧处理异常:", e);
         }
-    } catch (err) {
-        // 忽略网络抖动
-    }
-}, 300);
+    };
+
+    liveWs.onclose = () => {
+        console.warn("【WebSocket】连接断开，1.5 秒后自动重连...");
+        setTimeout(initLiveWebSocket, 1500);
+    };
+
+    liveWs.onerror = () => {
+        liveWs.close();
+    };
+}
+initLiveWebSocket();
 
 // 页面加载时自动获取先前缓存的地图配置或默认配置并加载，避免手动重新输入
 async function initDefaultMap() {
@@ -1001,20 +1026,20 @@ async function reloadMapFromServer(silent = false) {
         if (data.layers.emergency_stop_free) layers.emergency_stop_free.loadFromArray(data.layers.emergency_stop_free.points, data.layers.emergency_stop_free.scale, null, data.layers.emergency_stop_free.groups);
         if (data.layers.emergency_stop_occupied) layers.emergency_stop_occupied.loadFromArray(data.layers.emergency_stop_occupied.points, data.layers.emergency_stop_occupied.scale, null, data.layers.emergency_stop_occupied.groups);
         
-        const sizeOcc = data.layers.occupied ? data.layers.occupied.points.length : 0;
-        const sizePre = data.layers.preblocked ? data.layers.preblocked.points.length : 0;
-        const sizeTrav = data.layers.traversable ? data.layers.traversable.points.length : 0;
-        const sizeRisk = data.layers.risk_cost ? data.layers.risk_cost.points.length : 0;
+        const sizeOcc = layers.occupied.voxelList ? layers.occupied.voxelList.length : 0;
+        const sizePre = layers.preblocked.voxelList ? layers.preblocked.voxelList.length : 0;
+        const sizeTrav = layers.traversable.mesh ? layers.traversable.mesh.count : 0;
+        const sizeRisk = layers.risk_cost.voxelList ? layers.risk_cost.voxelList.length : 0;
         console.log("【地图重载成功】数据量：占据(橙):", sizeOcc, "禁行(红):", sizePre, "可通行(绿):", sizeTrav, "通行代价(渐变):", sizeRisk);
         
         // 自动将视角与绘制高度对齐到点云几何中心
-        if (data.layers.occupied && data.layers.occupied.points.length > 0) {
-            const pts = data.layers.occupied.points;
+        if (layers.occupied.voxelList && layers.occupied.voxelList.length > 0) {
+            const pts = layers.occupied.voxelList;
             let sumX = 0, sumY = 0, sumZ = 0;
             for (let i = 0; i < pts.length; i++) {
-                sumX += pts[i][0];
-                sumY += pts[i][1];
-                sumZ += pts[i][2];
+                sumX += pts[i].x;
+                sumY += pts[i].y;
+                sumZ += pts[i].z;
             }
             const avgX = sumX / pts.length;
             const avgY = sumY / pts.length;
@@ -1028,7 +1053,7 @@ async function reloadMapFromServer(silent = false) {
                 camera.position.set(avgX, avgY - 25, avgZ + 25);
                 
                 // 3. 自动将初始绘图高度对齐到点云的平均高度，更新 UI 和参考平面
-                const resolutionZ = data.layers.occupied.scale[2] || 0.05;
+                const resolutionZ = (data.layers.occupied && data.layers.occupied.scale) ? data.layers.occupied.scale[2] : 0.05;
                 zHeight = Math.round(avgZ / resolutionZ) * resolutionZ;
                 document.getElementById('edit-z').value = zHeight.toFixed(2);
                 editPlane.position.z = zHeight;
@@ -1040,8 +1065,17 @@ async function reloadMapFromServer(silent = false) {
             statusEl.innerText = `加载成功! 占据: ${sizeOcc}, 禁行: ${sizePre}, 可通行: ${sizeTrav}, 代价点数: ${sizeRisk}`;
         }
         
-        // 同步当前的服务器地图版本号，防止拉取完立即又检测出变化
+        // 同步当前的服务器地图版本号
+        for (const k in clientLayerVersions) delete clientLayerVersions[k];
+        if (data.layers) {
+            for (const name in data.layers) {
+                if (data.layers[name].version !== undefined) {
+                    clientLayerVersions[name] = data.layers[name].version;
+                }
+            }
+        }
         await initMapVersions();
+        sendWsSubscription();
         
         // 缓存成功的地图路径和名字
         localStorage.setItem('map_root_path', req.root_path);

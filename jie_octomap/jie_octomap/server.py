@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Web 3D 地图可视化管理服务端
+基于 FastAPI 提供 HTTP / REST 接口，配合 ros_bridge 实现与 ROS 规划系统的高性能增量同步
+"""
+
 import os
+import json
 import yaml
+import time
 import numpy as np
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
 from typing import List, Dict, Optional
 import uvicorn
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-import rospy
-import tf2_ros
-from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point, PointStamped, PoseStamped, TransformStamped
-from nav_msgs.msg import Path as ROSPath, Odometry
-from move_base_msgs.msg import MoveBaseActionGoal
-from sensor_msgs.msg import PointCloud2, PointField
-import sensor_msgs.point_cloud2 as pc2
-import time
-from std_msgs.msg import String
-from jie_map_msgs.srv import LoadNavigationMapPackage, LoadNavigationMapPackageRequest, SaveNavigationMapPackage, SaveNavigationMapPackageRequest, QueryCellDebugInfo, QueryCellDebugInfoRequest
-
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.gzip import GZipMiddleware
+from pydantic import BaseModel
 
-app = FastAPI()
+import rospy
+from geometry_msgs.msg import PointStamped, PoseStamped
+from move_base_msgs.msg import MoveBaseActionGoal
+from jie_map_msgs.srv import (
+    LoadNavigationMapPackage, LoadNavigationMapPackageRequest,
+    SaveNavigationMapPackage, SaveNavigationMapPackageRequest,
+    QueryCellDebugInfo, QueryCellDebugInfoRequest
+)
+
+from jie_octomap.ros_bridge import ros_bridge
+
+app = FastAPI(title="Jie OctoMap Web Server")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 executor = ThreadPoolExecutor(max_workers=8)
@@ -35,7 +42,7 @@ async def run_in_thread(func, *args, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
 
-# 挂载前端静态文件
+# 静态文件挂载
 current_dir = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=current_dir / "static", html=True), name="static")
 
@@ -52,244 +59,113 @@ class SaveMapRequest(BaseModel):
     map_name: str
     layers: Dict[str, Dict]
 
-# 全局 ROS 状态和订阅器缓存
-latest_ros_data = {
-    "occupied": None,
-    "preblocked": None,
-    "traversable": None,
-    "risk_cost": None,
-    "local_octomap": None,
-    "fused_octomap": None,
-    "emergency_stop_free": None,
-    "emergency_stop_occupied": None
-}
-# 全局存储最新规划好的路径点
-latest_planned_path = []
+class PointRequest(BaseModel):
+    x: float
+    y: float
+    z: float
+    layer_name: Optional[str] = ""
 
-# 全局存储最新里程计位姿
-latest_odom_pose = None
-
-# 全局存储最新 move_base status_text
-latest_status_text = "就绪"
-
-def status_text_callback(msg):
-    global latest_status_text
-    latest_status_text = msg.data
-
-# 地图更新版本控制（增量版本号，用于前端轻量级轮询同步）
-preblocked_version = 0
-occupied_version = 0
-
-def odom_callback(msg):
-    global latest_odom_pose
-    latest_odom_pose = msg.pose.pose
-
-def path_callback(msg):
-    global latest_planned_path
-    points = []
-    for pose in msg.poses:
-        points.append([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
-    latest_planned_path = points
-
-def parse_marker_or_array(msg):
-    groups = []
-    stamp = getattr(msg, 'header', None).stamp if hasattr(msg, 'header') else None
-    if isinstance(msg, MarkerArray):
-        for m in msg.markers:
-            if m.type == Marker.CUBE_LIST and m.action == Marker.ADD:
-                pts = [[p.x, p.y, p.z] for p in m.points]
-                sc = [m.scale.x, m.scale.y, m.scale.z] if m.scale.x > 0 else [0.1, 0.1, 0.1]
-                if pts:
-                    groups.append({"points": pts, "scale": sc})
-                if stamp is None and hasattr(m, 'header'):
-                    stamp = m.header.stamp
-    elif isinstance(msg, Marker):
-        if msg.type == Marker.CUBE_LIST and msg.action == Marker.ADD:
-            pts = [[p.x, p.y, p.z] for p in msg.points]
-            sc = [msg.scale.x, msg.scale.y, msg.scale.z] if msg.scale.x > 0 else [0.1, 0.1, 0.1]
-            if pts:
-                groups.append({"points": pts, "scale": sc})
-            if stamp is None and hasattr(msg, 'header'):
-                stamp = msg.header.stamp
-
-    all_pts = []
-    first_scale = [0.1, 0.1, 0.1]
-    if groups:
-        first_scale = groups[0]["scale"]
-        for g in groups:
-            all_pts.extend(g["points"])
-
-    return {
-        "groups": groups,
-        "points": all_pts,
-        "scale": first_scale,
-        "stamp": stamp if stamp is not None else rospy.Time(0)
-    }
-
-def occupied_callback(msg):
-    global occupied_version
-    parsed = parse_marker_or_array(msg)
-    if parsed["groups"]:
-        latest_ros_data["occupied"] = parsed
-        occupied_version += 1
-        print(f"[occupied_callback] Received occupied marker/array. Groups={len(parsed['groups'])} TotalPts={len(parsed['points'])} Version={occupied_version}", flush=True)
-
-def preblocked_callback(msg):
-    global preblocked_version
-    parsed = parse_marker_or_array(msg)
-    if parsed["groups"]:
-        latest_ros_data["preblocked"] = parsed
-        preblocked_version += 1
-        print(f"[preblocked_callback] Received preblocked marker. Points={len(parsed['points'])} Stamp={parsed['stamp'].to_sec()} Version={preblocked_version}", flush=True)
-
-def traversable_callback(msg):
-    parsed = parse_marker_or_array(msg)
-    if parsed["groups"]:
-        latest_ros_data["traversable"] = parsed
-        print(f"[traversable_callback] Received traversable marker. Points={len(parsed['points'])} Stamp={parsed['stamp'].to_sec()}", flush=True)
-
-def local_octomap_callback(msg):
-    parsed = parse_marker_or_array(msg)
-    if parsed["groups"]:
-        latest_ros_data["local_octomap"] = parsed
-
-def fused_octomap_callback(msg):
-    parsed = parse_marker_or_array(msg)
-    if parsed["groups"]:
-        latest_ros_data["fused_octomap"] = parsed
-
-def emergency_stop_callback(msg):
-    for m in msg.markers:
-        pts = [[p.x, p.y, p.z] for p in m.points] if m.action == Marker.ADD else []
-        scale = [m.scale.x, m.scale.y, m.scale.z] if m.scale.x > 0 else [0.06, 0.06, 0.06]
-        if m.ns == "emergency_stop_free" or m.id == 0:
-            latest_ros_data["emergency_stop_free"] = {"points": pts, "scale": scale, "stamp": m.header.stamp}
-        elif m.ns == "emergency_stop_occupied" or m.id == 1:
-            latest_ros_data["emergency_stop_occupied"] = {"points": pts, "scale": scale, "stamp": m.header.stamp}
-
-def risk_cost_callback(msg):
-    try:
-        if hasattr(msg, 'point_step') and msg.point_step == 16:
-            # Quick numpy parsing for FLOAT32 PointCloud2 fields (x, y, z, intensity)
-            data_arr = np.frombuffer(msg.data, dtype=np.float32).reshape(-1, 4)
-            risk_arr = data_arr[~np.isnan(data_arr).any(axis=1)]
-        else:
-            # Fallback to sensor_msgs.point_cloud2 generator
-            risk_records = list(pc2.read_points(
-                msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
-            risk_arr = (np.array([[r[0], r[1], r[2], r[3]] for r in risk_records], dtype=np.float32)
-                        if risk_records else np.empty((0, 4), dtype=np.float32))
-        
-        pts = risk_arr[:, :3].tolist()
-        intensities = risk_arr[:, 3].tolist()
-        
-        latest_ros_data["risk_cost"] = {
-            "points": pts,
-            "intensities": intensities,
-            "stamp": msg.header.stamp
-        }
-        print(f"[risk_cost_callback] Received risk cost cloud. Points={len(pts)} Stamp={msg.header.stamp.to_sec()}", flush=True)
-    except Exception as e:
-        print(f"[risk_cost_callback] Error parsing PointCloud2: {e}")
-
-# TF 监听与广播全局变量
-tf_buffer = None
-tf_listener = None
-tf_broadcaster = None
-publish_fake_tf = False
-fake_robot_pose = None  # 存储模拟机器人的最新坐标
-
-def publish_fake_tf_loop(event):
-    global fake_robot_pose, tf_broadcaster, publish_fake_tf
-    if not publish_fake_tf or tf_broadcaster is None or fake_robot_pose is None:
-        return
-    try:
-        now_stamp = rospy.Time.now()
-        child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
-        
-        # 1. 持续高频广播 map -> odom
-        t_map_odom = TransformStamped()
-        t_map_odom.header.stamp = now_stamp
-        t_map_odom.header.frame_id = "map"
-        t_map_odom.child_frame_id = "odom"
-        t_map_odom.transform.translation.x = 0.0
-        t_map_odom.transform.translation.y = 0.0
-        t_map_odom.transform.translation.z = 0.0
-        t_map_odom.transform.rotation.w = 1.0
-        
-        # 2. 持续高频广播 odom -> base_footprint
-        t_odom_base = TransformStamped()
-        t_odom_base.header.stamp = now_stamp
-        t_odom_base.header.frame_id = "odom"
-        t_odom_base.child_frame_id = child_frame
-        t_odom_base.transform.translation.x = fake_robot_pose["x"]
-        t_odom_base.transform.translation.y = fake_robot_pose["y"]
-        t_odom_base.transform.translation.z = fake_robot_pose["z"]
-        t_odom_base.transform.rotation.w = 1.0
-        
-        tf_broadcaster.sendTransform([t_map_odom, t_odom_base])
-    except Exception as e:
-        pass
-
-# 全局 ROS 发布者
-ros_pubs = {}
 
 @app.on_event("startup")
 def startup_event():
-    global tf_buffer, tf_listener, tf_broadcaster, publish_fake_tf, fake_robot_pose
     try:
-        rospy.init_node("web_map_manager", disable_signals=True)
-        ros_pubs["occupied"] = rospy.Publisher("/edited_occupied_markers", Marker, queue_size=1, latch=True)
-        ros_pubs["preblocked"] = rospy.Publisher("/edited_preblocked_cells_markers", Marker, queue_size=1, latch=True)
-        ros_pubs["start_pub"] = rospy.Publisher("/start_point", PointStamped, queue_size=1, latch=True)
-        ros_pubs["goal_pub"] = rospy.Publisher("/goal_point", PointStamped, queue_size=1, latch=True)
-        ros_pubs["goal_pose_pub"] = rospy.Publisher("/goal_pose", PoseStamped, queue_size=1, latch=True)
-        
-        # move_base standard goal publishers
-        ros_pubs["move_base_simple_goal"] = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=1, latch=True)
-        ros_pubs["move_base_action_goal"] = rospy.Publisher("/move_base/goal", MoveBaseActionGoal, queue_size=1, latch=True)
-        
-        # 获取话题名称与伪 TF 参数
-        occupied_topic = rospy.get_param("~occupied_marker_topic", "/octomap_occupied_markers")
-        preblocked_topic = rospy.get_param("~preblocked_marker_topic", "/move_base/preblocked_cells")
-        traversable_topic = rospy.get_param("~traversable_marker_topic", "/move_base/traversable_cells")
-        risk_cost_topic = rospy.get_param("~risk_cost_topic", "/move_base/risk_cost_cloud")
-        octomap_local_topic = rospy.get_param("~octomap_local_topic", "/octomap_local_markers")
-        octomap_fused_topic = rospy.get_param("~octomap_fused_topic", "/octomap_fused_markers")
-        emergency_stop_topic = rospy.get_param("~emergency_stop_topic", "/move_base/OctoLocalPlanner/emergency_stop_markers")
-        path_topic = rospy.get_param("~path_topic", "/move_base/plan")
-        odom_topic = rospy.get_param("~odom_topic", "/loc_base")
-        status_text_topic = rospy.get_param("~status_text_topic", "/move_base/status_text")
-        publish_fake_tf = rospy.get_param("~publish_fake_tf", False)
-        
-        # 初始化 TF2 监听器与广播器
-        tf_buffer = tf2_ros.Buffer()
-        tf_listener = tf2_ros.TransformListener(tf_buffer)
-        tf_broadcaster = tf2_ros.TransformBroadcaster()
-        
-        # 启动 20Hz (0.05s) 伪 TF 定时高频广播器，避免 Costmap transform timeout 报错
-        if publish_fake_tf:
-            if fake_robot_pose is None:
-                fake_robot_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
-            rospy.Timer(rospy.Duration(0.05), publish_fake_tf_loop)
-        
-        rospy.Subscriber(occupied_topic, MarkerArray, occupied_callback)
-        rospy.Subscriber(preblocked_topic, Marker, preblocked_callback)
-        rospy.Subscriber(traversable_topic, Marker, traversable_callback)
-        rospy.Subscriber(risk_cost_topic, PointCloud2, risk_cost_callback)
-        rospy.Subscriber(octomap_local_topic, MarkerArray, local_octomap_callback)
-        rospy.Subscriber(octomap_fused_topic, MarkerArray, fused_octomap_callback)
-        rospy.Subscriber(emergency_stop_topic, MarkerArray, emergency_stop_callback)
-        rospy.Subscriber(path_topic, ROSPath, path_callback)
-        rospy.Subscriber(odom_topic, Odometry, odom_callback)
-        rospy.Subscriber(status_text_topic, String, status_text_callback)
-        print(f"ROS 节点已启动，里程计({odom_topic})、地图({occupied_topic})与发布者就绪 (publish_fake_tf={publish_fake_tf})")
+        ros_bridge.init_ros()
     except Exception as e:
-        print(f"ROS 初始化警告 (非ROS环境可忽略): {e}")
+        print(f"[Startup] ROS 初始化警告: {e}")
+
+
+@app.websocket("/ws/live")
+async def websocket_live(websocket: WebSocket):
+    """
+    全双工实时流式通道：
+    整合机器人位姿、状态、路径与增量地图图层，通过单持久连接主动推送到前端。
+    彻底消除前端多路 HTTP 轮询与并发 pending 队头阻塞。
+    """
+    await websocket.accept()
+    client_requested_layers = None
+    client_layer_versions = {}
+    client_path_v = -1
+    client_status_v = -1
+
+    stop_event = asyncio.Event()
+
+    async def client_listener():
+        nonlocal client_requested_layers, client_layer_versions
+        try:
+            while not stop_event.is_set():
+                text = await websocket.receive_text()
+                msg = json.loads(text)
+                if msg.get("type") == "subscribe":
+                    client_requested_layers = msg.get("layers")
+                    if "versions" in msg and isinstance(msg["versions"], dict):
+                        client_layer_versions.update(msg["versions"])
+        except Exception:
+            stop_event.set()
+
+    listener_task = asyncio.create_task(client_listener())
+
+    try:
+        while not stop_event.is_set():
+            def build_frame():
+                frame = ros_bridge.get_live_frame(
+                    client_requested_layers,
+                    client_layer_versions,
+                    client_path_v,
+                    client_status_v
+                )
+                return frame, json.dumps(frame)
+
+            frame, json_str = await run_in_thread(build_frame)
+
+            # 更新已推送给该客户端的版本戳
+            if frame.get("path_version") is not None:
+                client_path_v = frame["path_version"]
+            if frame.get("status_version") is not None:
+                client_status_v = frame["status_version"]
+            for l_name, l_info in frame.get("layers", {}).items():
+                if "version" in l_info:
+                    client_layer_versions[l_name] = l_info["version"]
+
+            await websocket.send_text(json_str)
+            await asyncio.sleep(0.1) # 10Hz 稳定流式推送
+    except Exception:
+        pass
+    finally:
+        stop_event.set()
+        listener_task.cancel()
+
+
+@app.get("/api/get_current_map")
+async def get_current_map(layers: Optional[str] = None, versions: Optional[str] = None):
+    """
+    高频地图拉取核心接口：
+    支持基于 versions 参数的增量同步。若客户端已有对应版本，直接返回 unchanged: True
+    """
+    requested = layers.split(',') if layers else None
+    client_versions = {}
+    if versions:
+        try:
+            client_versions = json.loads(versions)
+        except Exception:
+            pass
+
+    response_layers = ros_bridge.get_layer_response(requested, client_versions)
+    return JSONResponse(content={"layers": response_layers})
+
+
+@app.get("/api/map_version")
+async def get_map_version():
+    """获取各图层当前最新版本号，便于前端轻量比对"""
+    return {
+        "preblocked_version": ros_bridge.layer_versions.get("preblocked", 0),
+        "occupied_version": ros_bridge.layer_versions.get("occupied", 0),
+        "all_versions": ros_bridge.layer_versions
+    }
+
 
 @app.post("/api/load_map")
 async def load_map(req: MapDataRequest):
-    """读取本地地图包，通过 ROS 加载服务载入原始地图，并将保存的编辑图层同步至 C++ 内存以完成地图恢复"""
+    """读取本地地图包并同步至 ROS 规划节点"""
     pkg_path = Path(req.root_path).expanduser() / req.map_name
     meta_path = pkg_path / "meta.yaml"
     layers_path = pkg_path / "layers.npz"
@@ -300,11 +176,11 @@ async def load_map(req: MapDataRequest):
     t_start = rospy.Time.now()
 
     # 清空缓存
-    latest_ros_data["occupied"] = None
-    latest_ros_data["preblocked"] = None
-    latest_ros_data["traversable"] = None
+    ros_bridge.latest_ros_data["occupied"] = None
+    ros_bridge.latest_ros_data["preblocked"] = None
+    ros_bridge.latest_ros_data["traversable"] = None
 
-    # 1. 尝试调用 ROS 载入服务以载入底层的原始 OctoMap
+    # 1. 触发 ROS 载入服务
     service_name = "/map_package_manager/load_package"
     try:
         def call_service():
@@ -317,606 +193,270 @@ async def load_map(req: MapDataRequest):
     except Exception as e:
         print(f"ROS 载入地图服务不可用: {e}")
 
-    # 2. 如果存在 layers.npz，直接读取并发布到 `/edited_occupied_markers` 与 `/edited_preblocked_cells_markers`
-    #    以恢复 C++ 规划节点的内存状态，而不改写磁盘文件
+    # 2. 若存在 layers.npz，发布以恢复内存
     if layers_path.exists():
         def load_npz():
             return np.load(layers_path, allow_pickle=False)
         layers_data = await run_in_thread(load_npz)
-        
-        # 恢复 occupied 栅格内存
-        if "occupied_points" in layers_data:
-            pts = layers_data["occupied_points"].tolist()
-            scale = layers_data["occupied_scale"].tolist() if "occupied_scale" in layers_data else [0.2, 0.2, 0.2]
-            
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = t_start
-            marker.ns = "occupied_cells"
-            marker.type = Marker.CUBE_LIST
-            marker.action = Marker.ADD
-            marker.scale.x, marker.scale.y, marker.scale.z = scale[0], scale[1], scale[2]
-            marker.color.r, marker.color.g, marker.color.b, marker.color.a = 0.95, 0.45, 0.15, 1.0
-            for pt in pts:
-                p = Point()
-                p.x, p.y, p.z = pt[0], pt[1], pt[2]
-                marker.points.append(p)
-            ros_pubs["occupied"].publish(marker)
-            
-        # 恢复 preblocked 禁行内存
-        if "preblocked_points" in layers_data:
-            pts = layers_data["preblocked_points"].tolist()
-            scale = layers_data["preblocked_scale"].tolist() if "preblocked_scale" in layers_data else [0.2, 0.2, 0.2]
-            
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = t_start
-            marker.ns = "preblocked_cells"
-            marker.type = Marker.CUBE_LIST
-            marker.action = Marker.ADD
-            marker.scale.x, marker.scale.y, marker.scale.z = scale[0], scale[1], scale[2]
-            marker.color.r, marker.color.g, marker.color.b, marker.color.a = 1.0, 0.0, 0.0, 1.0
-            for pt in pts:
-                p = Point()
-                p.x, p.y, p.z = pt[0], pt[1], pt[2]
-                marker.points.append(p)
-            ros_pubs["preblocked"].publish(marker)
+        for layer_name in ["occupied", "preblocked"]:
+            pts_key = f"{layer_name}_points"
+            sc_key = f"{layer_name}_scale"
+            if pts_key in layers_data:
+                pts = layers_data[pts_key].tolist()
+                sc = layers_data[sc_key].tolist() if sc_key in layers_data else [0.2, 0.2, 0.2]
+                ros_bridge.publish_edited_marker(layer_name, pts, sc, t_start)
 
-    # 3. 等待底层 C++ 节点 (OctoGlobalPlanner) 接收地图并完成 pre-build 预构建（发布 traversable 消息）
+    # 3. 等待底层 C++ 节点完成预构建发布
     timeout = 15.0
     start_wait = asyncio.get_event_loop().time()
     while asyncio.get_event_loop().time() - start_wait < timeout:
-        occ = latest_ros_data["occupied"]
-        pre = latest_ros_data["preblocked"]
-        tra = latest_ros_data["traversable"]
+        occ = ros_bridge.latest_ros_data["occupied"]
+        pre = ros_bridge.latest_ros_data["preblocked"]
+        tra = ros_bridge.latest_ros_data["traversable"]
         if (occ is not None and occ.get("stamp", rospy.Time(0)) >= t_start and
             pre is not None and pre.get("stamp", rospy.Time(0)) >= t_start and
             tra is not None and tra.get("stamp", rospy.Time(0)) >= t_start):
-            print(f"[load_map] C++ OctoGlobalPlanner pre-build completed in {asyncio.get_event_loop().time() - start_wait:.2f}s.", flush=True)
             break
         await asyncio.sleep(0.05)
 
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = yaml.safe_load(f)
-        
-        response_data = {"meta": meta, "layers": {}}
-        
-        # 优先使用从 ROS 订阅到的图层数据
-        if latest_ros_data["occupied"] is not None:
-            response_data["layers"]["occupied"] = {
-                "points": latest_ros_data["occupied"]["points"],
-                "scale": latest_ros_data["occupied"]["scale"],
-                "groups": latest_ros_data["occupied"].get("groups", [])
-            }
-        if latest_ros_data["preblocked"] is not None:
-            response_data["layers"]["preblocked"] = {
-                "points": latest_ros_data["preblocked"]["points"],
-                "scale": latest_ros_data["preblocked"]["scale"],
-                "groups": latest_ros_data["preblocked"].get("groups", [])
-            }
-        if latest_ros_data["traversable"] is not None:
-            response_data["layers"]["traversable"] = {
-                "points": latest_ros_data["traversable"]["points"],
-                "scale": latest_ros_data["traversable"]["scale"],
-                "groups": latest_ros_data["traversable"].get("groups", [])
-            }
-        if latest_ros_data["risk_cost"] is not None:
-            response_data["layers"]["risk_cost"] = {
-                "points": latest_ros_data["risk_cost"]["points"],
-                "intensities": latest_ros_data["risk_cost"]["intensities"],
-                "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
-            }
-        if latest_ros_data["local_octomap"] is not None:
-            response_data["layers"]["local_octomap"] = {
-                "points": latest_ros_data["local_octomap"]["points"],
-                "scale": latest_ros_data["local_octomap"]["scale"],
-                "groups": latest_ros_data["local_octomap"].get("groups", [])
-            }
-        if latest_ros_data["fused_octomap"] is not None:
-            response_data["layers"]["fused_octomap"] = {
-                "points": latest_ros_data["fused_octomap"]["points"],
-                "scale": latest_ros_data["fused_octomap"]["scale"],
-                "groups": latest_ros_data["fused_octomap"].get("groups", [])
-            }
 
-        # Fallback: 如果没有通过 ROS 话题收到 occupied（或 ROS 未开启），直接读取 NPZ 文件作为保底
-        if "occupied" not in response_data["layers"] or not response_data["layers"]["occupied"]:
+        # 获取全量图层（全量传递时不传 client_versions）
+        response_layers = ros_bridge.get_layer_response(None, {})
+
+        # Fallback 兜底
+        if "occupied" not in response_layers or not response_layers["occupied"].get("groups"):
             if layers_path.exists():
-                def load_npz():
-                    return np.load(layers_path, allow_pickle=False)
-                layers_data = await run_in_thread(load_npz)
-                for layer_name in ["occupied", "preblocked", "traversable"]:
-                    pts_key = f"{layer_name}_points"
-                    sc_key = f"{layer_name}_scale"
-                    if pts_key in layers_data and layer_name not in response_data["layers"]:
+                layers_data = await run_in_thread(lambda: np.load(layers_path, allow_pickle=False))
+                for l_name in ["occupied", "preblocked", "traversable"]:
+                    pts_key = f"{l_name}_points"
+                    sc_key = f"{l_name}_scale"
+                    if pts_key in layers_data:
                         pts_list = layers_data[pts_key].tolist()
                         sc_list = layers_data[sc_key].tolist() if sc_key in layers_data else [0.2, 0.2, 0.2]
-                        response_data["layers"][layer_name] = {
-                            "points": pts_list,
+                        response_layers[l_name] = {
+                            "version": 1,
+                            "unchanged": False,
                             "scale": sc_list,
                             "groups": [{"points": pts_list, "scale": sc_list}] if pts_list else []
                         }
-                if "risk_points" in layers_data and "risk_intensity" in layers_data and "risk_cost" not in response_data["layers"]:
-                    scale = layers_data["preblocked_scale"].tolist() if "preblocked_scale" in layers_data else [0.2, 0.2, 0.2]
-                    response_data["layers"]["risk_cost"] = {
-                        "points": layers_data["risk_points"].tolist(),
-                        "intensities": layers_data["risk_intensity"].tolist(),
-                        "scale": scale
-                    }
-        
-        return JSONResponse(content=response_data)
+
+        return JSONResponse(content={"meta": meta, "layers": response_layers})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/save_map")
 async def save_map(req: SaveMapRequest):
-    """将前端编辑后的地图同步至 ROS，并触发 ROS 保存服务将修改后的地图（含 OctoMap、各图层与元数据）保存至磁盘"""
+    """保存编辑图层至磁盘并同步至 ROS"""
     t_start = rospy.Time.now()
     pkg_path = Path(req.root_path).expanduser() / req.map_name
-    
-    # 1. 首先将前端发送的最新编辑数据同步至 ROS (以便 C++ 规划节点更新当前内存中的地图)
-    sync_preblocked = False
-    sync_occupied = False
-    
+
+    # 1. 同步编辑栅格至 ROS
+    sync_preblocked = "preblocked" in req.layers
+    sync_occupied = "occupied" in req.layers
     for layer_name, data in req.layers.items():
-        if layer_name in ros_pubs and "points" in data:
-            if layer_name == "preblocked":
-                sync_preblocked = True
-            elif layer_name == "occupied":
-                sync_occupied = True
-                
-            pts = data["points"]
-            scale = data["scale"]
-            
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = t_start
-            marker.ns = f"{layer_name}_cells"
-            marker.type = Marker.CUBE_LIST
-            marker.action = Marker.ADD
-            marker.scale.x, marker.scale.y, marker.scale.z = scale[0], scale[1], scale[2]
-            
-            if layer_name == "occupied":
-                marker.color.r, marker.color.g, marker.color.b, marker.color.a = 0.95, 0.45, 0.15, 1.0
-            elif layer_name == "preblocked":
-                marker.color.r, marker.color.g, marker.color.b, marker.color.a = 1.0, 0.0, 0.0, 1.0
-            
-            for pt in pts:
-                p = Point()
-                p.x, p.y, p.z = pt[0], pt[1], pt[2]
-                marker.points.append(p)
-                
-            ros_pubs[layer_name].publish(marker)
-            
-    # 2. 等待底层 C++ 节点更新完成
+        if "points" in data:
+            ros_bridge.publish_edited_marker(layer_name, data["points"], data["scale"], t_start)
+
+    # 2. 等待底层 C++ 更新
     wait_start = asyncio.get_event_loop().time()
     while asyncio.get_event_loop().time() - wait_start < 3.0:
-        preblocked_done = True
-        occupied_done = True
-        
-        if sync_preblocked:
-            pre = latest_ros_data["preblocked"]
-            preblocked_done = pre is not None and pre.get("stamp", rospy.Time(0)) >= t_start
-        if sync_occupied:
-            occ = latest_ros_data["occupied"]
-            occupied_done = occ is not None and occ.get("stamp", rospy.Time(0)) >= t_start
-            
-        if preblocked_done and occupied_done:
+        pre_ok = not sync_preblocked or (ros_bridge.latest_ros_data["preblocked"] is not None and
+                                         ros_bridge.latest_ros_data["preblocked"].get("stamp", rospy.Time(0)) >= t_start)
+        occ_ok = not sync_occupied or (ros_bridge.latest_ros_data["occupied"] is not None and
+                                       ros_bridge.latest_ros_data["occupied"].get("stamp", rospy.Time(0)) >= t_start)
+        if pre_ok and occ_ok:
             break
         await asyncio.sleep(0.05)
 
-    # 3. 调用 ROS 保存服务，触发底层保存 OctoMap 消息文件、图层 NPZ 和 meta.yaml
+    # 3. 触发 ROS 保存服务
     service_name = "/map_package_manager/save_package"
     try:
         def call_save():
             rospy.wait_for_service(service_name, timeout=2.0)
             save_service = rospy.ServiceProxy(service_name, SaveNavigationMapPackage)
-            req_save = SaveNavigationMapPackageRequest()
-            req_save.package_path = str(pkg_path)
-            req_save.overwrite = True
+            req_save = SaveNavigationMapPackageRequest(package_path=str(pkg_path), overwrite=True)
             return save_service(req_save)
-            
         resp = await run_in_thread(call_save)
         if resp.success:
             return {"status": "success", "message": f"地图已成功保存至 {pkg_path}！"}
-        else:
-            raise HTTPException(status_code=500, detail=f"保存地图服务返回失败: {resp.message}")
+        raise HTTPException(status_code=500, detail=f"保存地图服务返回失败: {resp.message}")
     except Exception as e:
-        # Fallback: 如果 ROS 保存服务不可用，回退至直接将前端图层保存到 NPZ（作为保底）
-        print(f"ROS 保存地图服务不可用 (回退至直接落盘 layers.npz): {e}")
+        print(f"ROS 保存服务异常，回退至直接保存 npz: {e}")
         def save_io():
             pkg_path.mkdir(parents=True, exist_ok=True)
             save_dict = {}
-            for layer_name, data in req.layers.items():
-                if "points" in data and len(data["points"]) > 0:
-                    save_dict[f"{layer_name}_points"] = np.array(data["points"], dtype=np.float32)
-                    save_dict[f"{layer_name}_scale"] = np.array(data["scale"], dtype=np.float32)
+            for l_name, d in req.layers.items():
+                if "points" in d and len(d["points"]) > 0:
+                    save_dict[f"{l_name}_points"] = np.array(d["points"], dtype=np.float32)
+                    save_dict[f"{l_name}_scale"] = np.array(d["scale"], dtype=np.float32)
             np.savez_compressed(pkg_path / "layers.npz", **save_dict)
-            
-        try:
-            await run_in_thread(save_io)
-            return {"status": "success", "message": f"已成功保存地图图层至 {pkg_path} (ROS 保存服务不可用)"}
-        except Exception as ex:
-            raise HTTPException(status_code=500, detail=str(ex))
+        await run_in_thread(save_io)
+        return {"status": "success", "message": f"已成功保存地图图层至 {pkg_path} (文件直接写入)"}
+
 
 @app.post("/api/sync_ros")
 async def sync_ros(req: SaveMapRequest):
-    """仅同步至 ROS 话题，不落盘"""
+    """仅同步至 ROS 话题，不写磁盘"""
     t_start = rospy.Time.now()
-    print(f"[sync_ros] Starting sync. t_start={t_start.to_sec()}", flush=True)
-    
-    sync_preblocked = False
-    sync_occupied = False
-    
+    sync_occupied = "occupied" in req.layers
     for layer_name, data in req.layers.items():
-        if layer_name in ros_pubs and "points" in data:
-            if layer_name == "preblocked":
-                sync_preblocked = True
-            elif layer_name == "occupied":
-                sync_occupied = True
-                
-            pts = data["points"]
-            scale = data["scale"]
-            print(f"[sync_ros] Publishing layer '{layer_name}' with {len(pts)} points.", flush=True)
-            
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = t_start
-            marker.ns = f"{layer_name}_cells"
-            marker.type = Marker.CUBE_LIST
-            marker.action = Marker.ADD
-            marker.scale.x, marker.scale.y, marker.scale.z = scale[0], scale[1], scale[2]
-            
-            # 颜色设置
-            if layer_name == "occupied":
-                marker.color.r, marker.color.g, marker.color.b, marker.color.a = 0.95, 0.45, 0.15, 1.0
-            elif layer_name == "preblocked":
-                marker.color.r, marker.color.g, marker.color.b, marker.color.a = 1.0, 0.0, 0.0, 1.0
-            
-            for pt in pts:
-                p = Point()
-                p.x, p.y, p.z = pt[0], pt[1], pt[2]
-                marker.points.append(p)
-                
-            ros_pubs[layer_name].publish(marker)
-            
-    # 同步等待底层 C++ 节点更新并重新发布（最多等待 30.0 秒）
-    # 注意：即便 sync_preblocked 为 False（用户未手绘禁行区），底层 C++ 仍会因 occupied 改变而重新计算并发布 preblocked 和 traversable 图层。
-    # 故我们始终需要等待最新的 preblocked 与 traversable 图层发布完成，才算 C++ 重建完全结束。
+        if "points" in data:
+            ros_bridge.publish_edited_marker(layer_name, data["points"], data["scale"], t_start)
+
+    # 等待 C++ 规划器重新构建
     wait_start = asyncio.get_event_loop().time()
     success = False
-    loop_count = 0
     while asyncio.get_event_loop().time() - wait_start < 30.0:
-        occupied_done = True
-        preblocked_done = False
-        traversable_done = False
-        
-        pre = latest_ros_data["preblocked"]
-        occ = latest_ros_data["occupied"]
-        tra = latest_ros_data["traversable"]
-        
+        occ_done = True
         if sync_occupied:
-            occupied_done = occ is not None and occ.get("stamp", rospy.Time(0)) >= t_start
-        else:
-            occupied_done = True
-            
-        preblocked_done = pre is not None and pre.get("stamp", rospy.Time(0)) >= t_start
-        traversable_done = tra is not None and tra.get("stamp", rospy.Time(0)) >= t_start
-            
-        if loop_count % 10 == 0:
-            pre_stamp_sec = pre.get("stamp", rospy.Time(0)).to_sec() if pre else 0.0
-            occ_stamp_sec = occ.get("stamp", rospy.Time(0)).to_sec() if occ else 0.0
-            tra_stamp_sec = tra.get("stamp", rospy.Time(0)).to_sec() if tra else 0.0
-            print(f"[sync_ros wait] loop={loop_count} occ_done={occupied_done}({occ_stamp_sec}) pre_done={preblocked_done}({pre_stamp_sec}) tra_done={traversable_done}({tra_stamp_sec}) t_start={t_start.to_sec()}", flush=True)
-            
-        if occupied_done and preblocked_done and traversable_done:
+            occ = ros_bridge.latest_ros_data["occupied"]
+            occ_done = occ is not None and occ.get("stamp", rospy.Time(0)) >= t_start
+
+        pre = ros_bridge.latest_ros_data["preblocked"]
+        tra = ros_bridge.latest_ros_data["traversable"]
+        pre_done = pre is not None and pre.get("stamp", rospy.Time(0)) >= t_start
+        tra_done = tra is not None and tra.get("stamp", rospy.Time(0)) >= t_start
+
+        if occ_done and pre_done and tra_done:
             success = True
             break
         await asyncio.sleep(0.05)
-        loop_count += 1
-        
-    duration = asyncio.get_event_loop().time() - wait_start
-    occ_stamp = latest_ros_data["occupied"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["occupied"] else 0.0
-    pre_stamp = latest_ros_data["preblocked"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["preblocked"] else 0.0
-    tra_stamp = latest_ros_data["traversable"].get("stamp", rospy.Time(0)).to_sec() if latest_ros_data["traversable"] else 0.0
-    if success:
-        print(f"[sync_ros] Sync finished successfully in {duration:.2f}s. stamp_occ={occ_stamp} stamp_pre={pre_stamp} stamp_tra={tra_stamp} t_start={t_start.to_sec()}", flush=True)
-    else:
-        print(f"[sync_ros] Sync TIMEOUT after {duration:.2f}s. stamp_occ={occ_stamp} stamp_pre={pre_stamp} stamp_tra={tra_stamp} t_start={t_start.to_sec()}", flush=True)
-        
-    return {"status": "success", "message": "地图已成功同步，且底层 C++ 规划器已完成重新结算！"}
 
-class PointRequest(BaseModel):
-    x: float
-    y: float
-    z: float
-    layer_name: Optional[str] = ""
+    duration = asyncio.get_event_loop().time() - wait_start
+    print(f"[sync_ros] 同步耗时: {duration:.2f}s, 成功={success}", flush=True)
+    return {"status": "success", "message": "地图已成功同步，底层 C++ 规划器已重新结算！"}
+
 
 @app.post("/api/set_start")
 async def set_start(req: PointRequest):
-    if "start_pub" in ros_pubs:
-        msg = PointStamped()
-        msg.header.frame_id = "map"
-        msg.header.stamp = rospy.Time.now()
-        msg.point.x = req.x
-        msg.point.y = req.y
-        msg.point.z = req.z
-        ros_pubs["start_pub"].publish(msg)
-        
-        msg_txt = f"起点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"
-        
-        if publish_fake_tf and tf_broadcaster is not None:
-            try:
-                global fake_robot_pose, latest_odom_pose
-                fake_robot_pose = {"x": req.x, "y": req.y, "z": req.z}
-                
-                # 手动设定起点后立即主动广播 1 次
-                publish_fake_tf_loop(None)
-                
-                # 构造并同步最新的 Odom 数据给 /loc_base
-                now_stamp = rospy.Time.now()
-                child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
-                odom_msg = Odometry()
-                odom_msg.header.stamp = now_stamp
-                odom_msg.header.frame_id = "map"
-                odom_msg.child_frame_id = child_frame
-                odom_msg.pose.pose.position.x = req.x
-                odom_msg.pose.pose.position.y = req.y
-                odom_msg.pose.pose.position.z = req.z
-                odom_msg.pose.pose.orientation.w = 1.0
-                
-                latest_odom_pose = odom_msg.pose.pose
-                msg_txt += " (已自动广播 20Hz 实时伪 TF 树: map -> odom -> base_footprint)"
-                print(f"[publish_fake_tf] 已更新并以 20Hz 持续广播伪 TF (map -> odom -> {child_frame}): [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]")
-            except Exception as e:
-                print(f"发布伪 TF 失败: {e}")
-                
-        return {"status": "success", "message": msg_txt}
-    else:
+    if "start_pub" not in ros_bridge.ros_pubs:
         raise HTTPException(status_code=500, detail="ROS 起点发布器未启动")
+
+    msg = PointStamped()
+    msg.header.frame_id = "map"
+    msg.header.stamp = rospy.Time.now()
+    msg.point.x, msg.point.y, msg.point.z = req.x, req.y, req.z
+    ros_bridge.ros_pubs["start_pub"].publish(msg)
+
+    if ros_bridge.publish_fake_tf:
+        ros_bridge.fake_robot_pose = {"x": req.x, "y": req.y, "z": req.z}
+        ros_bridge.publish_fake_tf_loop()
+
+    return {"status": "success", "message": f"起点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"}
+
 
 @app.post("/api/set_goal")
 async def set_goal(req: PointRequest):
-    if "goal_pub" in ros_pubs and "goal_pose_pub" in ros_pubs:
-        # 1. 优先从 /loc_base 里程计缓存获取机器人位置，无则使用 TF，最后手动保底
-        global latest_odom_pose, tf_buffer
-        start_source = None
-        
-        if latest_odom_pose is not None:
-            try:
-                msg_start = PointStamped()
-                msg_start.header.frame_id = "map"
-                msg_start.header.stamp = rospy.Time.now()
-                msg_start.point.x = latest_odom_pose.position.x
-                msg_start.point.y = latest_odom_pose.position.y
-                msg_start.point.z = latest_odom_pose.position.z
-                ros_pubs["start_pub"].publish(msg_start)
-                start_source = "Odom(/loc_base)"
-                print(f"自动从 Odom(/loc_base) 读取当前位置并发布为起点: [{msg_start.point.x:.2f}, {msg_start.point.y:.2f}, {msg_start.point.z:.2f}]")
-            except Exception as e:
-                print(f"基于 Odom 发布起点失败: {e}")
-                
-        if start_source is None and tf_buffer is not None:
-            def lookup_tf():
-                parent_frame = rospy.get_param("~tf_parent_frame", "map")
-                default_child = rospy.get_param("~tf_child_frame", "base_footprint")
-                candidate_children = [default_child, "odin1_base_link", "base_link"]
-                
-                trans = None
-                for child in candidate_children:
-                    try:
-                        trans = tf_buffer.lookup_transform(parent_frame, child, rospy.Time(0), rospy.Duration(0.15))
-                        break
-                    except Exception:
-                        continue
-                if trans is not None:
-                    try:
-                        t = trans.transform.translation
-                        msg_start = PointStamped()
-                        msg_start.header.frame_id = parent_frame
-                        msg_start.header.stamp = rospy.Time.now()
-                        msg_start.point.x = t.x
-                        msg_start.point.y = t.y
-                        msg_start.point.z = t.z
-                        
-                        ros_pubs["start_pub"].publish(msg_start)
-                        return True, t
-                    except Exception as e:
-                        print(f"发布 TF 起点失败: {e}")
-                return False, None
-
-            tf_success, t = await run_in_thread(lookup_tf)
-            if tf_success and t:
-                start_source = "TF"
-                print(f"自动从 TF 读取机器人当前位置并发布为起点: [{t.x:.2f}, {t.y:.2f}, {t.z:.2f}]")
-            else:
-                print("自动获取机器人 TF 起点位置失败 (未找到 map -> base_footprint/odin1_base_link/base_link 变换)")
-
-        # 2. 发布 PointStamped 目标点和 PoseStamped 目标位姿，触发规划器的 A* 算法
-        msg_point = PointStamped()
-        msg_point.header.frame_id = "map"
-        msg_point.header.stamp = rospy.Time.now()
-        msg_point.point.x = req.x
-        msg_point.point.y = req.y
-        msg_point.point.z = req.z
-        ros_pubs["goal_pub"].publish(msg_point)
-        
-        msg_pose = PoseStamped()
-        msg_pose.header.frame_id = "map"
-        msg_pose.header.stamp = rospy.Time.now()
-        msg_pose.pose.position.x = req.x
-        msg_pose.pose.position.y = req.y
-        msg_pose.pose.position.z = req.z
-        msg_pose.pose.orientation.w = 1.0
-        ros_pubs["goal_pose_pub"].publish(msg_pose)
-        
-        # 3. 同时发布到 move_base 的简单目标与动作目标话题
-        if "move_base_simple_goal" in ros_pubs:
-            try:
-                ros_pubs["move_base_simple_goal"].publish(msg_pose)
-            except Exception as e:
-                print(f"发布 move_base_simple_goal 失败: {e}")
-                
-        if "move_base_action_goal" in ros_pubs:
-            try:
-                action_goal = MoveBaseActionGoal()
-                action_goal.header.stamp = rospy.Time.now()
-                action_goal.goal_id.stamp = rospy.Time.now()
-                action_goal.goal_id.id = f"web_goal_{time.time()}"
-                action_goal.goal.target_pose = msg_pose
-                ros_pubs["move_base_action_goal"].publish(action_goal)
-            except Exception as e:
-                print(f"发布 move_base_action_goal 失败: {e}")
-        
-        msg_txt = f"终点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"
-        if start_source:
-            msg_txt += f" (已自动从 {start_source} 获取机器人当前位置作为起点并触发规划)"
-        else:
-            msg_txt += " (里程计与 TF 均不可用，已通过之前设定的手动起点触发规划)"
-            
-        return {"status": "success", "message": msg_txt}
-    else:
+    if "goal_pub" not in ros_bridge.ros_pubs or "goal_pose_pub" not in ros_bridge.ros_pubs:
         raise HTTPException(status_code=500, detail="ROS 终点发布器未启动")
+
+    # 1. 自动读取机器人当前位姿发布为规划起点
+    has_pose, pos, _ = ros_bridge.lookup_robot_pose()
+    start_source = None
+    if has_pose and pos:
+        msg_start = PointStamped()
+        msg_start.header.frame_id = "map"
+        msg_start.header.stamp = rospy.Time.now()
+        msg_start.point.x, msg_start.point.y, msg_start.point.z = pos["x"], pos["y"], pos["z"]
+        ros_bridge.ros_pubs["start_pub"].publish(msg_start)
+        start_source = "当前机器人位姿"
+
+    # 2. 发布终点 PointStamped 与 PoseStamped
+    now_stamp = rospy.Time.now()
+    msg_point = PointStamped()
+    msg_point.header.frame_id = "map"
+    msg_point.header.stamp = now_stamp
+    msg_point.point.x, msg_point.point.y, msg_point.point.z = req.x, req.y, req.z
+    ros_bridge.ros_pubs["goal_pub"].publish(msg_point)
+
+    msg_pose = PoseStamped()
+    msg_pose.header.frame_id = "map"
+    msg_pose.header.stamp = now_stamp
+    msg_pose.pose.position.x, msg_pose.pose.position.y, msg_pose.pose.position.z = req.x, req.y, req.z
+    msg_pose.pose.orientation.w = 1.0
+    ros_bridge.ros_pubs["goal_pose_pub"].publish(msg_pose)
+
+    # 3. 发布到 move_base 动作目标
+    if "move_base_simple_goal" in ros_bridge.ros_pubs:
+        ros_bridge.ros_pubs["move_base_simple_goal"].publish(msg_pose)
+    if "move_base_action_goal" in ros_bridge.ros_pubs:
+        action_goal = MoveBaseActionGoal()
+        action_goal.header.stamp = now_stamp
+        action_goal.goal_id.stamp = now_stamp
+        action_goal.goal_id.id = f"web_goal_{time.time()}"
+        action_goal.goal.target_pose = msg_pose
+        ros_bridge.ros_pubs["move_base_action_goal"].publish(action_goal)
+
+    info = f"终点已设定: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"
+    if start_source:
+        info += f" (已自动从 {start_source} 发布起点触发规划)"
+    return {"status": "success", "message": info}
+
 
 @app.get("/api/get_path")
 async def get_path():
-    return {"path": latest_planned_path}
+    return {"path": ros_bridge.latest_planned_path}
+
 
 @app.get("/api/get_status_text")
 async def get_status_text():
-    return {"status_text": latest_status_text}
+    return {"status_text": ros_bridge.latest_status_text}
+
 
 @app.get("/api/get_robot_pose")
 async def get_robot_pose():
-    global latest_odom_pose, tf_buffer
-    if latest_odom_pose is not None:
-        return {
-            "has_pose": True,
-            "position": {
-                "x": latest_odom_pose.position.x,
-                "y": latest_odom_pose.position.y,
-                "z": latest_odom_pose.position.z
-            },
-            "orientation": {
-                "x": latest_odom_pose.orientation.x,
-                "y": latest_odom_pose.orientation.y,
-                "z": latest_odom_pose.orientation.z,
-                "w": latest_odom_pose.orientation.w
-            }
-        }
-    elif tf_buffer is not None:
-        try:
-            parent_frame = rospy.get_param("~tf_parent_frame", "map")
-            candidate_children = [rospy.get_param("~tf_child_frame", "base_footprint"), "odin1_base_link", "base_link"]
-            trans = None
-            for child in candidate_children:
-                try:
-                    trans = tf_buffer.lookup_transform(parent_frame, child, rospy.Time(0), rospy.Duration(0.05))
-                    break
-                except Exception:
-                    continue
-            if trans is not None:
-                t = trans.transform.translation
-                r = trans.transform.rotation
-                return {
-                    "has_pose": True,
-                    "position": {"x": t.x, "y": t.y, "z": t.z},
-                    "orientation": {"x": r.x, "y": r.y, "z": r.z, "w": r.w}
-                }
-        except Exception:
-            pass
+    has_pose, pos, ori = ros_bridge.lookup_robot_pose()
+    if has_pose:
+        return {"has_pose": True, "position": pos, "orientation": ori}
     return {"has_pose": False}
 
 
 @app.post("/api/debug_cell")
 async def debug_cell(req: PointRequest):
-    service_name = "/octomap_roi_merger/query_cell_debug_info"
-    try:
-        service_name = rospy.get_param("~query_cell_debug_service", service_name)
-    except Exception:
-        pass
+    service_name = rospy.get_param("~query_cell_debug_service", "/octomap_roi_merger/query_cell_debug_info")
     try:
         def call_service():
             try:
                 rospy.wait_for_service(service_name, timeout=1.0)
             except Exception:
-                # Fallback to jie_path_node service if merger node service is unavailable
                 fallback_name = "/jie_path_node/query_cell_debug_info"
                 rospy.wait_for_service(fallback_name, timeout=1.0)
-                query_service = rospy.ServiceProxy(fallback_name, QueryCellDebugInfo)
-                return query_service(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or ""))
-            query_service = rospy.ServiceProxy(service_name, QueryCellDebugInfo)
-            return query_service(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or ""))
+                return rospy.ServiceProxy(fallback_name, QueryCellDebugInfo)(
+                    QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or "")
+                )
+            return rospy.ServiceProxy(service_name, QueryCellDebugInfo)(
+                QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or "")
+            )
         resp = await run_in_thread(call_service)
         if not resp.success:
             return {"status": "error", "message": resp.message}
         return {
             "status": "success",
-            "grid_x": resp.grid_x,
-            "grid_y": resp.grid_y,
-            "grid_z": resp.grid_z,
-            "is_occupied": resp.is_occupied,
-            "is_unknown": resp.is_unknown,
+            "grid_x": resp.grid_x, "grid_y": resp.grid_y, "grid_z": resp.grid_z,
+            "is_occupied": resp.is_occupied, "is_unknown": resp.is_unknown,
             "has_ground_support": resp.has_ground_support,
-            "is_preblocked": resp.is_preblocked,
-            "preblocked_reason": resp.preblocked_reason,
+            "is_preblocked": resp.is_preblocked, "preblocked_reason": resp.preblocked_reason,
             "has_vertical_collision": resp.has_vertical_collision,
             "has_horizontal_collision": resp.has_horizontal_collision,
             "has_below_preblocked_failure": resp.has_below_preblocked_failure,
-            "preblocked_cost": resp.preblocked_cost,
-            "risk_cost": resp.risk_cost,
-            "is_candidate": resp.is_candidate,
-            "is_traversable": resp.is_traversable,
+            "preblocked_cost": resp.preblocked_cost, "risk_cost": resp.risk_cost,
+            "is_candidate": resp.is_candidate, "is_traversable": resp.is_traversable,
             "node_source_info": getattr(resp, 'node_source_info', 'N/A')
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ROS 调试服务不可用: {e}")
 
-@app.get("/api/map_version")
-async def get_map_version():
-    return {"preblocked_version": preblocked_version, "occupied_version": occupied_version}
-
-@app.get("/api/get_current_map")
-async def get_current_map(layers: Optional[str] = None):
-    requested = set(layers.split(',')) if layers else None
-    
-    response_layers = {}
-    all_supported_layers = [
-        "occupied", "preblocked", "traversable", "risk_cost",
-        "local_octomap", "fused_octomap", "emergency_stop_free", "emergency_stop_occupied"
-    ]
-    
-    for layer_name in all_supported_layers:
-        if requested is not None and layer_name not in requested:
-            continue
-        
-        data = latest_ros_data.get(layer_name)
-        if data is not None:
-            if layer_name == "risk_cost":
-                response_layers[layer_name] = {
-                    "points": data["points"],
-                    "intensities": data["intensities"],
-                    "scale": latest_ros_data["occupied"]["scale"] if latest_ros_data["occupied"] else [0.2, 0.2, 0.2]
-                }
-            else:
-                response_layers[layer_name] = {
-                    "points": data["points"],
-                    "scale": data["scale"],
-                    "groups": data.get("groups", [])
-                }
-                
-    return JSONResponse(content={"layers": response_layers})
 
 @app.get("/api/default_map")
 async def get_default_map():
-    default_map_package = os.environ.get("MAP_VIEWER_DEFAULT_PACKAGE", "/home/robot/maps/map")
-    try:
-        default_map_package = rospy.get_param("~default_map_package", default_map_package)
-    except Exception:
-        pass
-    path = Path(default_map_package).expanduser()
+    default_pkg = rospy.get_param("~default_map_package", os.environ.get("MAP_VIEWER_DEFAULT_PACKAGE", "/home/robot/maps/map"))
+    path = Path(default_pkg).expanduser()
     return {"root_path": str(path.parent), "map_name": str(path.name)}
+
 
 def main():
     uvicorn.run(app, host="0.0.0.0", port=8008)
