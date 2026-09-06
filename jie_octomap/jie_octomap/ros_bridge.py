@@ -248,16 +248,31 @@ class RosBridge:
             t_map_odom.child_frame_id = "odom"
             t_map_odom.transform.rotation.w = 1.0
 
-            t_odom_base = TransformStamped()
-            t_odom_base.header.stamp = now_stamp
-            t_odom_base.header.frame_id = "odom"
-            t_odom_base.child_frame_id = child_frame
-            t_odom_base.transform.translation.x = self.fake_robot_pose["x"]
-            t_odom_base.transform.translation.y = self.fake_robot_pose["y"]
-            t_odom_base.transform.translation.z = self.fake_robot_pose["z"]
-            t_odom_base.transform.rotation.w = 1.0
+            # 广播 odom -> child_frame (默认 base_footprint)
+            t_odom_footprint = TransformStamped()
+            t_odom_footprint.header.stamp = now_stamp
+            t_odom_footprint.header.frame_id = "odom"
+            t_odom_footprint.child_frame_id = child_frame
+            t_odom_footprint.transform.translation.x = self.fake_robot_pose["x"]
+            t_odom_footprint.transform.translation.y = self.fake_robot_pose["y"]
+            t_odom_footprint.transform.translation.z = self.fake_robot_pose["z"]
+            t_odom_footprint.transform.rotation.w = 1.0
 
-            self.tf_broadcaster.sendTransform([t_map_odom, t_odom_base])
+            # 增加 base_link 的 TF 变换（和 base_footprint 完全一致）
+            t_odom_baselink = TransformStamped()
+            t_odom_baselink.header.stamp = now_stamp
+            t_odom_baselink.header.frame_id = "odom"
+            t_odom_baselink.child_frame_id = "base_link"
+            t_odom_baselink.transform.translation.x = self.fake_robot_pose["x"]
+            t_odom_baselink.transform.translation.y = self.fake_robot_pose["y"]
+            t_odom_baselink.transform.translation.z = self.fake_robot_pose["z"]
+            t_odom_baselink.transform.rotation.w = 1.0
+
+            transforms = [t_map_odom, t_odom_footprint]
+            if child_frame != "base_link":
+                transforms.append(t_odom_baselink)
+
+            self.tf_broadcaster.sendTransform(transforms)
         except Exception:
             pass
 
@@ -319,7 +334,7 @@ class RosBridge:
         if self.tf_buffer is not None:
             try:
                 parent_frame = rospy.get_param("~tf_parent_frame", "map")
-                candidates = [rospy.get_param("~tf_child_frame", "base_footprint"), "odin1_base_link", "base_link"]
+                candidates = [rospy.get_param("~tf_child_frame", "base_footprint"), "base_link", "odin1_base_link"]
                 for child in candidates:
                     try:
                         trans = self.tf_buffer.lookup_transform(parent_frame, child, rospy.Time(0), rospy.Duration(0.05))

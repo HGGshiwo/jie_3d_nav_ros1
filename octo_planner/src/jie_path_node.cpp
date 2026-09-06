@@ -47,7 +47,12 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   pnh_.param<bool>("strict_direct_ground_support", strict_direct_ground_support, true);
   pnh_.param<int>("ground_support_xy_radius_cells", ground_support_xy_radius_cells, 1);
   pnh_.param<int>("ground_support_depth_cells", ground_support_depth_cells, 2);
+  double max_step_height_m;
+  pnh_.param<double>("max_step_height_m", max_step_height_m, 0.30);
+  pnh_.param<double>("max_step_height", max_step_height_m, max_step_height_m);
   pnh_.param<int>("max_step_height_cells", max_step_height_cells, 1);
+  double robot_height_m;
+  pnh_.param<double>("robot_height_m", robot_height_m, 0.60);
   pnh_.param<int>("robot_clearance_height_cells", robot_clearance_height_cells, 0);
   pnh_.param<bool>("enable_preblocked_costmap", enable_preblocked_costmap_, true);
   enable_preblocked_costmap = enable_preblocked_costmap_;
@@ -76,8 +81,15 @@ JiePathNode::JiePathNode(ros::NodeHandle & nh, ros::NodeHandle & pnh)
   planner_.setStrictDirectGroundSupport(strict_direct_ground_support);
   planner_.setGroundSupportXYRadiusCells(ground_support_xy_radius_cells);
   planner_.setGroundSupportDepthCells(ground_support_depth_cells);
-  planner_.setMaxStepHeightCells(max_step_height_cells);
+  planner_.setMaxStepHeightM(max_step_height_m);
+  if (pnh_.hasParam("max_step_height_cells") && !pnh_.hasParam("max_step_height_m") && !pnh_.hasParam("max_step_height")) {
+    planner_.setMaxStepHeightCells(max_step_height_cells);
+  }
+  double heuristic_weight;
+  pnh_.param<double>("heuristic_weight", heuristic_weight, 1.20);
+  planner_.setRobotHeightM(robot_height_m);
   planner_.setRobotClearanceHeightCells(robot_clearance_height_cells);
+  planner_.setHeuristicWeight(heuristic_weight);
   planner_.setEnablePreblockedCostmap(enable_preblocked_costmap);
   planner_.setPreblockedCostmapRadiusCells(preblocked_costmap_radius_cells);
   planner_.setPreblockedCostmapWeight(preblocked_costmap_weight);

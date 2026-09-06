@@ -27,7 +27,7 @@ from jie_map_msgs.srv import (
 from octomap_msgs.msg import Octomap
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs.point_cloud2 as pc2
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 class MapPackageManager:
@@ -45,21 +45,21 @@ class MapPackageManager:
         # Latest messages (protected by lock because callbacks run in threads)
         self._lock = threading.Lock()
         self._latest_octomap:     Optional[Octomap] = None
-        self._latest_occupied:    Optional[Marker] = None
+        self._latest_occupied:    Optional[MarkerArray] = None
         self._latest_preblocked:  Optional[Marker] = None
         self._latest_traversable: Optional[Marker] = None
         self._latest_risk_cost:   Optional[PointCloud2] = None
 
         # Publishers (latch=True → transient_local equivalent)
         self._octomap_pub = rospy.Publisher(self._octomap_topic,     Octomap,     queue_size=1, latch=True)
-        self._occupied_pub = rospy.Publisher(self._occupied_topic,    Marker,      queue_size=1, latch=True)
+        self._occupied_pub = rospy.Publisher(self._occupied_topic,    MarkerArray, queue_size=1, latch=True)
         self._preblocked_pub = rospy.Publisher(self._preblocked_topic,  Marker,      queue_size=1, latch=True)
         self._traversable_pub = rospy.Publisher(self._traversable_topic, Marker,      queue_size=1, latch=True)
         self._risk_cost_pub = rospy.Publisher(self._risk_cost_topic,   PointCloud2, queue_size=1, latch=True)
 
         # Subscribers
         rospy.Subscriber(self._octomap_topic,     Octomap,     self._on_octomap,     queue_size=1)
-        rospy.Subscriber(self._occupied_topic,    Marker,      self._on_occupied,    queue_size=1)
+        rospy.Subscriber(self._occupied_topic,    MarkerArray, self._on_occupied,    queue_size=1)
         rospy.Subscriber(self._preblocked_topic,  Marker,      self._on_preblocked,  queue_size=1)
         rospy.Subscriber(self._traversable_topic, Marker,      self._on_traversable, queue_size=1)
         rospy.Subscriber(self._risk_cost_topic,   PointCloud2, self._on_risk_cost,   queue_size=1)
@@ -80,10 +80,9 @@ class MapPackageManager:
         with self._lock:
             self._latest_octomap = copy.deepcopy(msg)
 
-    def _on_occupied(self, msg: Marker) -> None:
-        if msg.type == Marker.CUBE_LIST:
-            with self._lock:
-                self._latest_occupied = copy.deepcopy(msg)
+    def _on_occupied(self, msg: MarkerArray) -> None:
+        with self._lock:
+            self._latest_occupied = copy.deepcopy(msg)
 
     def _on_preblocked(self, msg: Marker) -> None:
         if msg.type == Marker.CUBE_LIST:
@@ -355,13 +354,15 @@ class MapPackageManager:
         # Rebuild occupied marker (optional, may not be in older packages)
         occupied_msg = None
         if "occupied_points" in layers_npz:
-            occupied_msg = self._make_marker_from_points(
+            m = self._make_marker_from_points(
                 str(layers_npz["occupied_frame_id"][0]),
                 "occupied_voxels",
                 layers_npz["occupied_scale"],
                 layers_npz["occupied_points"],
                 (0.95, 0.45, 0.15, 0.95),
             )
+            occupied_msg = MarkerArray()
+            occupied_msg.markers.append(m)
 
         preblocked_msg = self._make_marker_from_points(
             str(layers_npz["preblocked_frame_id"][0]),

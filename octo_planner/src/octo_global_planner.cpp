@@ -13,6 +13,7 @@
 #include <visualization_msgs/Marker.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/point_cloud2_iterator.h>
+#include <jie_map_msgs/QueryCellDebugInfo.h>
 
 #include "octo_planner/octo_planner_core.h"
 
@@ -70,7 +71,12 @@ public:
     private_nh.param<bool>("strict_direct_ground_support", strict_direct_ground_support, true);
     private_nh.param<int>("ground_support_xy_radius_cells", ground_support_xy_radius_cells, 1);
     private_nh.param<int>("ground_support_depth_cells", ground_support_depth_cells, 2);
+    double max_step_height_m;
+    private_nh.param<double>("max_step_height_m", max_step_height_m, 0.30);
+    private_nh.param<double>("max_step_height", max_step_height_m, max_step_height_m);
     private_nh.param<int>("max_step_height_cells", max_step_height_cells, 1);
+    double robot_height_m;
+    private_nh.param<double>("robot_height_m", robot_height_m, 0.60);
     private_nh.param<int>("robot_clearance_height_cells", robot_clearance_height_cells, 0);
     private_nh.param<bool>("enable_preblocked_costmap", enable_preblocked_costmap, true);
     private_nh.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells, 3);
@@ -91,8 +97,15 @@ public:
 
     planner_.setGroundSupportXYRadiusCells(ground_support_xy_radius_cells);
     planner_.setGroundSupportDepthCells(ground_support_depth_cells);
-    planner_.setMaxStepHeightCells(max_step_height_cells);
+    planner_.setMaxStepHeightM(max_step_height_m);
+    if (private_nh.hasParam("max_step_height_cells") && !private_nh.hasParam("max_step_height_m") && !private_nh.hasParam("max_step_height")) {
+      planner_.setMaxStepHeightCells(max_step_height_cells);
+    }
+    double heuristic_weight;
+    private_nh.param<double>("heuristic_weight", heuristic_weight, 1.20);
+    planner_.setRobotHeightM(robot_height_m);
     planner_.setRobotClearanceHeightCells(robot_clearance_height_cells);
+    planner_.setHeuristicWeight(heuristic_weight);
     planner_.setEnablePreblockedCostmap(enable_preblocked_costmap);
     planner_.setPreblockedCostmapRadiusCells(preblocked_costmap_radius_cells);
     planner_.setPreblockedCostmapWeight(preblocked_costmap_weight);
@@ -118,6 +131,10 @@ public:
 
     // Initialize status publisher
     status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
+
+    // Advertise query_cell_debug_info service under move_base namespace (~query_cell_debug_info resolves to /move_base/query_cell_debug_info)
+    query_cell_debug_srv_ = move_base_nh.advertiseService(
+        "query_cell_debug_info", &OctoGlobalPlanner::handleQueryCellDebugInfo, this);
 
     initialized_ = true;
     ROS_INFO("OctoGlobalPlanner initialized successfully. Waiting for map message on %s...", octomap_topic_.c_str());
@@ -353,6 +370,48 @@ public:
     status_pub_.publish(msg);
   }
 
+  bool handleQueryCellDebugInfo(
+    jie_map_msgs::QueryCellDebugInfo::Request & req,
+    jie_map_msgs::QueryCellDebugInfo::Response & res)
+  {
+    if (!map_ready_)
+    {
+      res.success = false;
+      res.message = "Global planner octomap not ready";
+      return true;
+    }
+
+    const GridIndex idx = planner_.worldToGrid(req.x, req.y, req.z);
+    CellDebugDetails details;
+    bool ret = planner_.queryCellDebugInfo(idx, details);
+    if (!ret)
+    {
+      res.success = false;
+      res.message = "Query failed, outside bounds or octree not initialized";
+      return true;
+    }
+
+    res.grid_x = details.grid_x;
+    res.grid_y = details.grid_y;
+    res.grid_z = details.grid_z;
+    res.is_occupied = details.is_occupied;
+    res.is_unknown = details.is_unknown;
+    res.has_ground_support = details.has_ground_support;
+    res.is_preblocked = details.is_preblocked;
+    res.preblocked_reason = details.preblocked_reason;
+    res.has_vertical_collision = details.has_vertical_collision;
+    res.has_horizontal_collision = details.has_horizontal_collision;
+    res.has_below_preblocked_failure = details.has_below_preblocked_failure;
+    res.preblocked_cost = details.preblocked_cost;
+    res.risk_cost = details.risk_cost;
+    res.is_candidate = details.is_candidate;
+    res.is_traversable = details.is_traversable;
+    res.node_source_info = details.node_source_info;
+    res.success = true;
+    res.message = "OK";
+    return true;
+  }
+
   bool initialized_;
   bool map_ready_;
   bool map_changed_;
@@ -367,6 +426,7 @@ public:
   ros::Publisher traversable_marker_pub_;
   ros::Publisher preblocked_marker_pub_;
   ros::Publisher risk_cost_pub_;
+  ros::ServiceServer query_cell_debug_srv_;
   std::string last_status_;
   OctoPlannerCore planner_;
 };

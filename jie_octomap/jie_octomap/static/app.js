@@ -33,6 +33,9 @@ if (editZInput) zHeight = parseFloat(editZInput.value) || 0.0;
 if (editLayerSelect) currentLayer = editLayerSelect.value;
 const checkedTool = document.querySelector('input[name="tool"]:checked');
 if (checkedTool) currentTool = checkedTool.value;
+if (debugPanelDiv) {
+    debugPanelDiv.style.display = (currentTool === 'debug' || currentTool === 'debug_air') ? 'block' : 'none';
+}
 
 // ---- 1. 场景初始化 ----
 const container = document.getElementById('canvas-container');
@@ -143,7 +146,7 @@ document.querySelectorAll('input[name="tool"]').forEach(radio => {
     radio.addEventListener('change', (e) => {
         currentTool = e.target.value;
         if (debugPanelDiv) {
-            if (currentTool === 'debug') {
+            if (currentTool === 'debug' || currentTool === 'debug_air') {
                 debugPanelDiv.style.display = 'block';
             } else {
                 debugPanelDiv.style.display = 'none';
@@ -611,9 +614,20 @@ let liveWs = null;
 
 function sendWsSubscription() {
     if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        const activeLayers = getActiveRequestedLayers();
+        // 关键防护：如果某个图层已被激活，但本地 Mesh 并无数据（点数为 0），
+        // 强制申报版本为 -1，要求服务端立即下发全量图层数据
+        activeLayers.forEach(name => {
+            const l = layers[name];
+            const hasData = (l && l.mesh && l.mesh.count > 0) || (l && l.voxelList && l.voxelList.length > 0);
+            if (!hasData) {
+                clientLayerVersions[name] = -1;
+            }
+        });
+
         liveWs.send(JSON.stringify({
             type: "subscribe",
-            layers: getActiveRequestedLayers(),
+            layers: activeLayers,
             versions: clientLayerVersions
         }));
     }
@@ -675,8 +689,14 @@ function initLiveWebSocket() {
                 }
                 if (data.layers.traversable && document.getElementById('show-traversable')?.checked) {
                     const l = data.layers.traversable;
-                    if (l.version !== undefined) clientLayerVersions.traversable = l.version;
-                    if (!l.unchanged) layers.traversable.loadFast(l.groups, l.scale);
+                    if (!l.unchanged && l.groups) {
+                        layers.traversable.loadFast(l.groups, l.scale);
+                        if (l.version !== undefined) clientLayerVersions.traversable = l.version;
+                    } else if (l.unchanged && layers.traversable.mesh.count === 0) {
+                        // 防护自愈：服务端误判为 unchanged 但本地无数据，强制要求全量推送
+                        clientLayerVersions.traversable = -1;
+                        sendWsSubscription();
+                    }
                 }
                 if (data.layers.risk_cost && document.getElementById('show-risk-cost')?.checked) {
                     const l = data.layers.risk_cost;
@@ -686,13 +706,23 @@ function initLiveWebSocket() {
                 if (!isDirty) {
                     if (data.layers.occupied && document.getElementById('show-occupied')?.checked) {
                         const l = data.layers.occupied;
-                        if (l.version !== undefined) clientLayerVersions.occupied = l.version;
-                        if (!l.unchanged) layers.occupied.loadFromArray(l.points, l.scale, null, l.groups);
+                        if (!l.unchanged && (l.groups || l.points)) {
+                            layers.occupied.loadFromArray(l.points, l.scale, null, l.groups);
+                            if (l.version !== undefined) clientLayerVersions.occupied = l.version;
+                        } else if (l.unchanged && (!layers.occupied.voxelList || layers.occupied.voxelList.length === 0)) {
+                            clientLayerVersions.occupied = -1;
+                            sendWsSubscription();
+                        }
                     }
                     if (data.layers.preblocked && document.getElementById('show-preblocked')?.checked) {
                         const l = data.layers.preblocked;
-                        if (l.version !== undefined) clientLayerVersions.preblocked = l.version;
-                        if (!l.unchanged) layers.preblocked.loadFromArray(l.points, l.scale, null, l.groups);
+                        if (!l.unchanged && (l.groups || l.points)) {
+                            layers.preblocked.loadFromArray(l.points, l.scale, null, l.groups);
+                            if (l.version !== undefined) clientLayerVersions.preblocked = l.version;
+                        } else if (l.unchanged && (!layers.preblocked.voxelList || layers.preblocked.voxelList.length === 0)) {
+                            clientLayerVersions.preblocked = -1;
+                            sendWsSubscription();
+                        }
                     }
                 }
             }
@@ -816,6 +846,7 @@ async function queryCellDebugInfo(x, y, z, layerName = '') {
         if (!res.ok) throw new Error((await res.json()).detail || "查询失败");
         const data = await res.json();
         if (data.status === 'success') {
+            if (debugPanelDiv) debugPanelDiv.style.display = 'block';
             statusEl.innerText = "诊断信息查询成功";
             document.getElementById('debug-grid-coord').innerText = `[${data.grid_x}, ${data.grid_y}, ${data.grid_z}]`;
             document.getElementById('debug-world-coord').innerText = `[${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}]`;

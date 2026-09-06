@@ -100,7 +100,34 @@ public:
   void setGroundSupportXYRadiusCells(int val) { ground_support_xy_radius_cells_ = val; }
   void setGroundSupportDepthCells(int val) { ground_support_depth_cells_ = val; }
   void setMaxStepHeightCells(int val) { max_step_height_cells_ = val; }
+  void setMaxStepHeightM(double val) {
+    max_step_height_m_ = val;
+    updateStepHeightCells();
+  }
+  double getMaxStepHeightM() const { return max_step_height_m_; }
+  void setRobotHeightM(double val) {
+    robot_height_m_ = val;
+    updateStepHeightCells();
+  }
+  double getRobotHeightM() const { return robot_height_m_; }
+  void setRobotHeightCells(int val) { robot_height_cells_ = val; }
+  int getRobotHeightCells() const { return robot_height_cells_; }
+  void updateStepHeightCells() {
+    if (octree_) {
+      const double res = octree_->getResolution();
+      if (res > 1e-6) {
+        if (max_step_height_m_ > 0.0) {
+          max_step_height_cells_ = std::max(1, static_cast<int>(std::round(max_step_height_m_ / res)));
+        }
+        if (robot_height_m_ > 0.0) {
+          robot_height_cells_ = std::max(1, static_cast<int>(std::round(robot_height_m_ / res)));
+        }
+      }
+    }
+  }
   void setRobotClearanceHeightCells(int val) { robot_clearance_height_cells_ = val; }
+  void setHeuristicWeight(double val) { heuristic_weight_ = val; }
+  double getHeuristicWeight() const { return heuristic_weight_; }
   void setEnablePreblockedCostmap(bool val) { enable_preblocked_costmap_ = val; }
   void setPreblockedCostmapRadiusCells(int val) { preblocked_costmap_radius_cells_ = val; }
   void setPreblockedCostmapWeight(double val) { preblocked_costmap_weight_ = val; }
@@ -138,10 +165,13 @@ public:
   void rebuildPreblockedCostmap();
   void rebuildAllLayers();
 
-  // Getters for layers
   std::unordered_set<GridIndex, GridIndexHash> getPreblockedCells() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     return preblocked_cells_;
+  }
+  std::unordered_set<GridIndex, GridIndexHash> getCliffCells() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return cliff_cells_;
   }
   std::unordered_set<GridIndex, GridIndexHash> getExternalPreblockedCells() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -203,8 +233,12 @@ private:
   bool strict_direct_ground_support_;
   int ground_support_xy_radius_cells_;
   int ground_support_depth_cells_;
+  double max_step_height_m_;
   int max_step_height_cells_;
+  double robot_height_m_;
+  int robot_height_cells_;
   int robot_clearance_height_cells_;
+  double heuristic_weight_;
   bool enable_preblocked_costmap_;
   int preblocked_costmap_radius_cells_;
   double preblocked_costmap_weight_;
@@ -222,6 +256,7 @@ private:
   std::unordered_set<GridIndex, GridIndexHash> traversable_cells_;
   std::unordered_set<GridIndex, GridIndexHash> candidates_;
   std::unordered_set<GridIndex, GridIndexHash> preblocked_cells_;
+  std::unordered_set<GridIndex, GridIndexHash> cliff_cells_;
   std::unordered_set<GridIndex, GridIndexHash> external_preblocked_cells_;
   std::unordered_map<GridIndex, double, GridIndexHash> preblocked_costmap_;
   std::atomic<bool> cancel_;

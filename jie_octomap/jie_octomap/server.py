@@ -82,10 +82,11 @@ async def websocket_live(websocket: WebSocket):
     彻底消除前端多路 HTTP 轮询与并发 pending 队头阻塞。
     """
     await websocket.accept()
-    client_requested_layers = None
+    client_requested_layers = []
     client_layer_versions = {}
     client_path_v = -1
     client_status_v = -1
+    state_lock = asyncio.Lock()
 
     stop_event = asyncio.Event()
 
@@ -96,9 +97,14 @@ async def websocket_live(websocket: WebSocket):
                 text = await websocket.receive_text()
                 msg = json.loads(text)
                 if msg.get("type") == "subscribe":
-                    client_requested_layers = msg.get("layers")
-                    if "versions" in msg and isinstance(msg["versions"], dict):
-                        client_layer_versions.update(msg["versions"])
+                    async with state_lock:
+                        client_requested_layers = list(msg.get("layers", []))
+                        if "versions" in msg and isinstance(msg["versions"], dict):
+                            client_layer_versions.update(msg["versions"])
+                            # 移除未请求图层的版本缓存，避免下次重新订阅时产生版本残留
+                            for k in list(client_layer_versions.keys()):
+                                if k not in client_requested_layers:
+                                    client_layer_versions.pop(k, None)
         except Exception:
             stop_event.set()
 
@@ -106,10 +112,14 @@ async def websocket_live(websocket: WebSocket):
 
     try:
         while not stop_event.is_set():
+            async with state_lock:
+                req_layers = list(client_requested_layers)
+                req_versions = dict(client_layer_versions)
+
             def build_frame():
                 frame = ros_bridge.get_live_frame(
-                    client_requested_layers,
-                    client_layer_versions,
+                    req_layers,
+                    req_versions,
                     client_path_v,
                     client_status_v
                 )
@@ -118,13 +128,15 @@ async def websocket_live(websocket: WebSocket):
             frame, json_str = await run_in_thread(build_frame)
 
             # 更新已推送给该客户端的版本戳
-            if frame.get("path_version") is not None:
-                client_path_v = frame["path_version"]
-            if frame.get("status_version") is not None:
-                client_status_v = frame["status_version"]
-            for l_name, l_info in frame.get("layers", {}).items():
-                if "version" in l_info:
-                    client_layer_versions[l_name] = l_info["version"]
+            async with state_lock:
+                if frame.get("path_version") is not None:
+                    client_path_v = frame["path_version"]
+                if frame.get("status_version") is not None:
+                    client_status_v = frame["status_version"]
+                for l_name, l_info in frame.get("layers", {}).items():
+                    # 关键保障：仅当本帧切实下发了非 unchanged 的完整数据，才记录该版本已被客户端接收
+                    if "version" in l_info and not l_info.get("unchanged", False):
+                        client_layer_versions[l_name] = l_info["version"]
 
             await websocket.send_text(json_str)
             await asyncio.sleep(0.1) # 10Hz 稳定流式推送
@@ -417,20 +429,29 @@ async def get_robot_pose():
 
 @app.post("/api/debug_cell")
 async def debug_cell(req: PointRequest):
-    service_name = rospy.get_param("~query_cell_debug_service", "/octomap_roi_merger/query_cell_debug_info")
+    param_service = rospy.get_param("~query_cell_debug_service", "/move_base/query_cell_debug_info")
+    candidates = []
+    if param_service:
+        candidates.append(param_service)
+    candidates.extend([
+        "/move_base/query_cell_debug_info",
+        "/jie_path_node/query_cell_debug_info",
+        "/octomap_roi_merger/query_cell_debug_info"
+    ])
+    seen = set()
+    unique_candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
     try:
         def call_service():
-            try:
-                rospy.wait_for_service(service_name, timeout=1.0)
-            except Exception:
-                fallback_name = "/jie_path_node/query_cell_debug_info"
-                rospy.wait_for_service(fallback_name, timeout=1.0)
-                return rospy.ServiceProxy(fallback_name, QueryCellDebugInfo)(
-                    QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or "")
-                )
-            return rospy.ServiceProxy(service_name, QueryCellDebugInfo)(
-                QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or "")
-            )
+            for srv_name in unique_candidates:
+                try:
+                    rospy.wait_for_service(srv_name, timeout=0.2)
+                    proxy = rospy.ServiceProxy(srv_name, QueryCellDebugInfo)
+                    return proxy(QueryCellDebugInfoRequest(x=req.x, y=req.y, z=req.z, layer_name=req.layer_name or ""))
+                except Exception:
+                    continue
+            raise RuntimeError(f"未找到可用的网格调试服务 (已尝试: {', '.join(unique_candidates)})")
+
         resp = await run_in_thread(call_service)
         if not resp.success:
             return {"status": "error", "message": resp.message}

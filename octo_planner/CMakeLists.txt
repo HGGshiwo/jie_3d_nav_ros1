@@ -56,6 +56,9 @@ include_directories(
 # ---- octo_planner_core ----
 add_library(octo_planner_core
   src/octo_planner_core.cpp
+  src/octo_planner_core_layers.cpp
+  src/octo_planner_core_path.cpp
+  src/octo_planner_core_path_smooth.cpp
   src/octo_search_engine.cpp
 )
 target_link_libraries(octo_planner_core

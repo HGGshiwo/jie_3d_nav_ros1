@@ -68,6 +68,9 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   private_nh.param<bool>("strict_direct_ground_support", strict_direct_ground_support_, false);
   private_nh.param<int>("ground_support_xy_radius_cells", ground_support_xy_radius_cells_, 1);
   private_nh.param<int>("ground_support_depth_cells", ground_support_depth_cells_, 2);
+  double max_step_height_m = 0.30;
+  private_nh.param<double>("max_step_height_m", max_step_height_m, 0.30);
+  private_nh.param<double>("max_step_height", max_step_height_m, max_step_height_m);
   private_nh.param<int>("max_step_height_cells", max_step_height_cells_, 1);
   private_nh.param<int>("robot_clearance_height_cells", robot_clearance_height_cells_, 0);
   private_nh.param<int>("snap_search_radius_cells", snap_search_radius_cells_, 8);
@@ -77,7 +80,16 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   planner_.setStrictDirectGroundSupport(strict_direct_ground_support_);
   planner_.setGroundSupportXYRadiusCells(ground_support_xy_radius_cells_);
   planner_.setGroundSupportDepthCells(ground_support_depth_cells_);
-  planner_.setMaxStepHeightCells(max_step_height_cells_);
+  planner_.setMaxStepHeightM(max_step_height_m);
+  if (private_nh.hasParam("max_step_height_cells") && !private_nh.hasParam("max_step_height_m") && !private_nh.hasParam("max_step_height")) {
+    planner_.setMaxStepHeightCells(max_step_height_cells_);
+  }
+  double robot_height_m = 0.60;
+  private_nh.param<double>("robot_height_m", robot_height_m, 0.60);
+  planner_.setRobotHeightM(robot_height_m);
+  double heuristic_weight = 1.20;
+  private_nh.param<double>("heuristic_weight", heuristic_weight, 1.20);
+  planner_.setHeuristicWeight(heuristic_weight);
   planner_.setRobotClearanceHeightCells(robot_clearance_height_cells_);
   planner_.setSnapSearchRadiusCells(snap_search_radius_cells_);
 
