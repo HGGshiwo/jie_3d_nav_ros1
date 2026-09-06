@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_core
   pluginlib
   costmap_2d
+  teb_local_planner
 )
 
 find_package(OCTOMAP REQUIRED)
@@ -44,6 +45,7 @@ catkin_package(
     nav_core
     pluginlib
     costmap_2d
+    teb_local_planner
 )
 
 include_directories(
@@ -116,6 +118,10 @@ add_dependencies(d1_local_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${c
 # ---- octo_local_planner_plugin ----
 add_library(octo_local_planner_plugin
   src/octo_local_planner.cpp
+  src/octo_local_planner_tracking.cpp
+  src/forbidden_zone_field.cpp
+  src/edge_forbidden_zone.cpp
+  src/octo_teb_optimal_planner.cpp
   src/octo_elastic_band.cpp
   src/octo_local_visualizer.cpp
   src/d1_velocity_smoother.cpp

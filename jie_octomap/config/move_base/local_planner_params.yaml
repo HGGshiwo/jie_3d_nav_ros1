@@ -43,6 +43,11 @@ OctoLocalPlanner:
   goal_position_tolerance: 0.3
   goal_yaw_tolerance: 0.3
 
+  # Emergency Stop Probe
+  enable_emergency_stop_check: true
+  emergency_stop_min_occupied_voxels: 3
+  robot_body_height: 0.26 # 机器狗躯干正中心相对 base_footprint 的高度偏置 (m)
+
 D1LocalPlanner:
   # Path tracking geometry
   lookahead_distance: 1.00

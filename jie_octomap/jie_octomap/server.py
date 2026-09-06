@@ -85,6 +85,7 @@ async def websocket_live(websocket: WebSocket):
     client_requested_layers = []
     client_layer_versions = {}
     client_path_v = -1
+    client_local_path_v = -1
     client_status_v = -1
     state_lock = asyncio.Lock()
 
@@ -121,7 +122,8 @@ async def websocket_live(websocket: WebSocket):
                     req_layers,
                     req_versions,
                     client_path_v,
-                    client_status_v
+                    client_status_v,
+                    client_local_path_v
                 )
                 return frame, json.dumps(frame)
 
@@ -131,6 +133,8 @@ async def websocket_live(websocket: WebSocket):
             async with state_lock:
                 if frame.get("path_version") is not None:
                     client_path_v = frame["path_version"]
+                if frame.get("local_path_version") is not None:
+                    client_local_path_v = frame["local_path_version"]
                 if frame.get("status_version") is not None:
                     client_status_v = frame["status_version"]
                 for l_name, l_info in frame.get("layers", {}).items():

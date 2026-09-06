@@ -7,6 +7,7 @@
 #include <tf2_ros/buffer.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
+#include <nav_msgs/Path.h>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
 #include <std_msgs/String.h>
@@ -21,6 +22,9 @@
 #include "octo_planner/octo_elastic_band.h"
 #include "octo_planner/octo_local_visualizer.h"
 #include "octo_planner/d1_velocity_smoother.h"
+#include "octo_planner/gradient_footprint_model.h"
+#include "octo_planner/forbidden_zone_field.h"
+#include "octo_planner/octo_teb_optimal_planner.h"
 
 namespace octo_planner
 {
@@ -52,6 +56,7 @@ private:
   bool lookupRobotPose2D(RobotPose2D & robot_pose);
   bool computeFinalYawErrorXY(const geometry_msgs::PoseStamped & final_pose_in, double & yaw_error);
   bool transformToBase(const geometry_msgs::PoseStamped & pose_in, geometry_msgs::PoseStamped & pose_out);
+  bool checkEmergencyStop(const RobotPose2D & robot_pose, geometry_msgs::Twist & cmd_vel);
   
   bool shouldApplyRobotCenterOffset(const std::string & frame) const { return frame == robot_center_offset_frame_; }
   void applyRobotCenterOffset(const std::string & frame, RobotPose2D & rp) const {
@@ -88,6 +93,7 @@ private:
   ros::Subscriber octomap_sub_;
   ros::Publisher status_pub_;
   ros::Publisher emergency_stop_pub_;
+  ros::Publisher local_plan_pub_;
 
   // Planner Components
   OctoPlannerCore planner_;
@@ -112,6 +118,7 @@ private:
   double linear_deadband_, lateral_deadband_, angular_deadband_;
   bool   enable_emergency_stop_check_;
   int    emergency_stop_min_occupied_voxels_;
+  double robot_body_height_;
 
   double robot_radius_;
   bool require_ground_support_;
@@ -131,6 +138,17 @@ private:
   bool   goal_reached_;
   std::string last_status_;
   geometry_msgs::Twist last_cmd_vel_;
+
+  // TEB Optimizer & Forbidden Zone Gradient Components
+  bool use_teb_optimizer_;
+  double weight_forbidden_zone_;
+  double footprint_front_offset_, footprint_front_radius_;
+  double footprint_rear_offset_, footprint_rear_radius_;
+  teb_local_planner::TebConfig teb_config_;
+  std::unique_ptr<OctoTebOptimalPlanner> teb_planner_;
+  ForbiddenZoneField forbidden_field_;
+  GradientFootprintModelPtr footprint_model_;
+
   std::recursive_mutex planner_mutex_;
 };
 

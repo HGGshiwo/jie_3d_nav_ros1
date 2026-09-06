@@ -77,6 +77,8 @@ class RosBridge:
         
         self.latest_planned_path: List[List[float]] = []
         self.path_version = 0
+        self.latest_local_path: List[List[float]] = []
+        self.local_path_version = 0
         self.latest_odom_pose = None
         self.latest_status_text = "就绪"
         self.status_version = 0
@@ -113,6 +115,7 @@ class RosBridge:
         octomap_fused_topic = rospy.get_param("~octomap_fused_topic", "/octomap_fused_markers")
         emergency_stop_topic = rospy.get_param("~emergency_stop_topic", "/move_base/OctoLocalPlanner/emergency_stop_markers")
         path_topic = rospy.get_param("~path_topic", "/move_base/plan")
+        local_path_topic = rospy.get_param("~local_path_topic", "/move_base/local_plan")
         odom_topic = rospy.get_param("~odom_topic", "/loc_base")
         status_text_topic = rospy.get_param("~status_text_topic", "/move_base/status_text")
         self.publish_fake_tf = rospy.get_param("~publish_fake_tf", False)
@@ -136,6 +139,7 @@ class RosBridge:
         rospy.Subscriber(octomap_fused_topic, MarkerArray, self._fused_octomap_callback)
         rospy.Subscriber(emergency_stop_topic, MarkerArray, self._emergency_stop_callback)
         rospy.Subscriber(path_topic, ROSPath, self._path_callback)
+        rospy.Subscriber(local_path_topic, ROSPath, self._local_path_callback)
         rospy.Subscriber(odom_topic, Odometry, self._odom_callback)
         rospy.Subscriber(status_text_topic, String, self._status_text_callback)
         
@@ -153,6 +157,10 @@ class RosBridge:
     def _path_callback(self, msg: ROSPath):
         self.latest_planned_path = [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
         self.path_version += 1
+
+    def _local_path_callback(self, msg: ROSPath):
+        self.latest_local_path = [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
+        self.local_path_version += 1
 
     def _update_layer(self, name: str, parsed_data: Dict[str, Any]):
         self.latest_ros_data[name] = parsed_data
@@ -199,18 +207,16 @@ class RosBridge:
                 occ_pts.extend(pts)
                 occ_scale = sc
 
-        if free_pts:
-            self._update_layer("emergency_stop_free", {
-                "groups": [{"points": free_pts, "scale": free_scale}],
-                "scale": free_scale,
-                "stamp": stamp
-            })
-        if occ_pts:
-            self._update_layer("emergency_stop_occupied", {
-                "groups": [{"points": occ_pts, "scale": occ_scale}],
-                "scale": occ_scale,
-                "stamp": stamp
-            })
+        self._update_layer("emergency_stop_free", {
+            "groups": [{"points": free_pts, "scale": free_scale}] if free_pts else [],
+            "scale": free_scale,
+            "stamp": stamp
+        })
+        self._update_layer("emergency_stop_occupied", {
+            "groups": [{"points": occ_pts, "scale": occ_scale}] if occ_pts else [],
+            "scale": occ_scale,
+            "stamp": stamp
+        })
 
     def _risk_cost_callback(self, msg: PointCloud2):
         try:
@@ -371,13 +377,14 @@ class RosBridge:
 
         self.ros_pubs[layer_name].publish(marker)
 
-    def get_live_frame(self, requested_layers: Optional[List[str]], client_versions: Dict[str, int], client_path_v: int = -1, client_status_v: int = -1) -> Dict[str, Any]:
+    def get_live_frame(self, requested_layers: Optional[List[str]], client_versions: Dict[str, int], client_path_v: int = -1, client_status_v: int = -1, client_local_path_v: int = -1) -> Dict[str, Any]:
         """为 WebSocket 构造聚合帧：整合位姿、路径、状态与增量图层"""
         has_pose, pos, ori = self.lookup_robot_pose()
         layers_data = self.get_layer_response(requested_layers, client_versions)
 
         # 仅在发生变化时才携带完整 path，避免每帧重复发送大数组
         path_data = self.latest_planned_path if (client_path_v < 0 or client_path_v != self.path_version) else None
+        local_path_data = self.latest_local_path if (client_local_path_v < 0 or client_local_path_v != self.local_path_version) else None
         status_data = self.latest_status_text if (client_status_v < 0 or client_status_v != self.status_version) else None
 
         return {
@@ -386,6 +393,8 @@ class RosBridge:
             "status_version": self.status_version,
             "path": path_data,
             "path_version": self.path_version,
+            "local_path": local_path_data,
+            "local_path_version": self.local_path_version,
             "layers": layers_data
         }
 

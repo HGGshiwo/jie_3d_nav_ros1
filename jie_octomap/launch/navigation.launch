@@ -5,7 +5,7 @@
     <!-- 全局 3D Octomap 地图获取方式配置：
          1. global_octomap_path 不为空时，启动 map_package_manager 加载离线地图包
          2. global_octomap_path 为空时，启动 occupancy_grid_to_octomap 将 2D 地图转换发布 -->
-    <arg name="global_octomap_path" default="/home/hggshiwo/catkin_ws/octomap" />
+    <arg name="global_octomap_path" default="/home/hggshiwo/catkin_ws/map-segmentpatch" />
     <arg name="map_topic" default="" />
     <arg name="use_rviz" default="true" />
 
@@ -98,6 +98,7 @@
         <param name="path_topic" value="/move_base/plan" />
         <param name="odom_topic" value="/loc_base" />
         <param name="publish_fake_tf" value="$(arg publish_fake_tf)" />
+        <param name="query_cell_debug_service" value="/move_base/query_cell_debug_info" />
     </node>
 
     <!-- RViz 可视化界面 -->

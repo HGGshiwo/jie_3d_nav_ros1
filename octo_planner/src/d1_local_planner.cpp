@@ -303,27 +303,22 @@ bool D1LocalPlanner::selectTrackingTarget(TrackingTarget & target)
 
 bool D1LocalPlanner::lookupRobotPose2D(RobotPose2D & robot_pose)
 {
-  std::string last_error;
-  for (const auto & base_frame : getBaseFrameCandidates()) {
-    try {
-      const auto tf = tf_buffer_->lookupTransform(map_frame_, base_frame, ros::Time(0), ros::Duration(0.05));
-      if (active_base_frame_ != base_frame) {
-        active_base_frame_ = base_frame;
-        ROS_INFO("D1LocalPlanner: Using robot base frame for tracking: %s", base_frame.c_str());
-      }
-      robot_pose.x   = tf.transform.translation.x;
-      robot_pose.y   = tf.transform.translation.y;
-      robot_pose.z   = tf.transform.translation.z;
-      robot_pose.yaw = tf2::getYaw(tf.transform.rotation);
-      applyRobotCenterOffset(base_frame, robot_pose);
-      return true;
-    } catch (const tf2::TransformException & ex) {
-      last_error = ex.what();
-    }
+  if (!costmap_ros_) return false;
+  const std::string base_frame = costmap_ros_->getBaseFrameID();
+  try {
+    const auto tf = tf_buffer_->lookupTransform(map_frame_, base_frame, ros::Time(0), ros::Duration(0.05));
+    active_base_frame_ = base_frame;
+    robot_pose.x   = tf.transform.translation.x;
+    robot_pose.y   = tf.transform.translation.y;
+    robot_pose.z   = tf.transform.translation.z;
+    robot_pose.yaw = tf2::getYaw(tf.transform.rotation);
+    applyRobotCenterOffset(base_frame, robot_pose);
+    return true;
+  } catch (const tf2::TransformException & ex) {
+    ROS_WARN_THROTTLE(2.0, "D1LocalPlanner: Lookup robot pose %s -> %s failed: %s",
+      map_frame_.c_str(), base_frame.c_str(), ex.what());
+    return false;
   }
-  ROS_WARN_THROTTLE(2.0, "D1LocalPlanner: Lookup robot pose from %s failed for all base_frame candidates. Last: %s",
-    map_frame_.c_str(), last_error.c_str());
-  return false;
 }
 
 bool D1LocalPlanner::computeFinalYawErrorXY(const geometry_msgs::PoseStamped & final_pose_in, double & yaw_error)
@@ -347,9 +342,8 @@ bool D1LocalPlanner::computeFinalYawErrorXY(const geometry_msgs::PoseStamped & f
 
 bool D1LocalPlanner::transformToBase(const geometry_msgs::PoseStamped & pose_in, geometry_msgs::PoseStamped & pose_out)
 {
-  RobotPose2D unused;
-  if (active_base_frame_.empty() && !lookupRobotPose2D(unused)) return false;
-  const std::string base_frame = active_base_frame_.empty() ? base_frame_ : active_base_frame_;
+  if (!costmap_ros_) return false;
+  const std::string base_frame = costmap_ros_->getBaseFrameID();
   geometry_msgs::PoseStamped stamped = pose_in;
   if (stamped.header.frame_id.empty()) stamped.header.frame_id = map_frame_;
   stamped.header.stamp = ros::Time(0);

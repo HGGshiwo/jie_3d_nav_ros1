@@ -165,6 +165,7 @@ let traversablePointsObject = null;
 let traversablePickObject = null;
 let riskPointsObject = null;
 let pathObject = null;
+let localPathObject = null;
 let trackingPointObject = null;
 let startArrow = null;
 let startCube = null;
@@ -548,6 +549,46 @@ function setPath(pathMsg) {
   pathObject = new THREE.Mesh(geometry, material);
   scene.add(pathObject);
   scheduleNavigationConfirmation(pathMsg);
+}
+
+function setLocalPath(pathMsg) {
+  if (localPathObject) {
+    scene.remove(localPathObject);
+    localPathObject.geometry.dispose();
+    if (localPathObject.material) {
+      localPathObject.material.dispose();
+    }
+    localPathObject = null;
+  }
+
+  if (!pathMsg.poses || pathMsg.poses.length < 2) {
+    return;
+  }
+
+  const points = pathMsg.poses.map(
+    (pose) =>
+      new THREE.Vector3(
+        pose.pose.position.x,
+        pose.pose.position.y,
+        pose.pose.position.z,
+      ),
+  );
+  const curve = new THREE.CatmullRomCurve3(points);
+  const geometry = new THREE.TubeGeometry(
+    curve,
+    Math.max(16, points.length * 3),
+    Math.max(voxelSize * 0.28, 0.08),
+    12,
+    false,
+  );
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x00ffcc,
+    emissive: 0x006655,
+    roughness: 0.2,
+    metalness: 0.1,
+  });
+  localPathObject = new THREE.Mesh(geometry, material);
+  scene.add(localPathObject);
 }
 
 function setTrackingPoint(marker) {
@@ -1412,6 +1453,13 @@ function connectRosbridge(url = wsInput.value.trim(), manual = false) {
       messageType: "nav_msgs/Path",
     });
     pathTopic.subscribe(setPath);
+
+    const localPathTopic = new ROSLIB.Topic({
+      ros,
+      name: "/move_base/local_plan",
+      messageType: "nav_msgs/Path",
+    });
+    localPathTopic.subscribe(setLocalPath);
 
     const trackingPointTopic = new ROSLIB.Topic({
       ros,

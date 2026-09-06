@@ -445,6 +445,7 @@ window.addEventListener('keyup', (e) => {
 let startMesh = null;
 let goalMesh = null;
 let pathLine = null;
+let localPathLine = null;
 
 function updateStartVisual(x, y, z) {
     if (startMesh) scene.remove(startMesh);
@@ -473,6 +474,22 @@ function updatePathVisual(points) {
     const material = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 3 }); // 青色路径
     pathLine = new THREE.Line(geometry, material);
     scene.add(pathLine);
+}
+
+function updateLocalPathVisual(points) {
+    if (localPathLine) {
+        scene.remove(localPathLine);
+        localPathLine.geometry.dispose();
+        localPathLine.material.dispose();
+        localPathLine = null;
+    }
+    if (!points || points.length < 2) return;
+
+    const threePoints = points.map(pt => new THREE.Vector3(pt[0], pt[1], pt[2]));
+    const geometry = new THREE.BufferGeometry().setFromPoints(threePoints);
+    const material = new THREE.LineBasicMaterial({ color: 0xff007f, linewidth: 4 }); // 亮玫红色局部优化轨迹
+    localPathLine = new THREE.Line(geometry, material);
+    scene.add(localPathLine);
 }
 
 async function setStartPoint(x, y, z) {
@@ -661,6 +678,9 @@ function initLiveWebSocket() {
             // 3. 规划路径更新
             if (data.path) {
                 updatePathVisual(data.path);
+            }
+            if (data.local_path !== undefined) {
+                updateLocalPathVisual(data.local_path);
             }
 
             // 4. 动态图层增量渲染
