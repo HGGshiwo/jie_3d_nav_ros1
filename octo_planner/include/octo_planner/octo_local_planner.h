@@ -57,6 +57,7 @@ private:
   bool computeFinalYawErrorXY(const geometry_msgs::PoseStamped & final_pose_in, double & yaw_error);
   bool transformToBase(const geometry_msgs::PoseStamped & pose_in, geometry_msgs::PoseStamped & pose_out);
   bool checkEmergencyStop(const RobotPose2D & robot_pose, geometry_msgs::Twist & cmd_vel);
+  void resetPlanState();
   
   bool shouldApplyRobotCenterOffset(const std::string & frame) const { return frame == robot_center_offset_frame_; }
   void applyRobotCenterOffset(const std::string & frame, RobotPose2D & rp) const {
@@ -97,6 +98,7 @@ private:
 
   // Planner Components
   OctoPlannerCore planner_;
+  OctoPlannerCore bg_planner_;
   OctoElasticBand elastic_band_;
   OctoLocalVisualizer visualizer_;
   D1VelocitySmoother velocity_smoother_;

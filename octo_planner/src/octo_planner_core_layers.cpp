@@ -17,6 +17,21 @@ void OctoPlannerCore::rebuildAllLayers()
   rebuildPreblockedCostmap();
 }
 
+void OctoPlannerCore::swapLayersAndMap(OctoPlannerCore& other)
+{
+  std::lock_guard<std::recursive_mutex> lock_this(mutex_);
+  std::lock_guard<std::recursive_mutex> lock_other(other.mutex_);
+  octree_.swap(other.octree_);
+  std::swap(min_idx_, other.min_idx_);
+  std::swap(max_idx_, other.max_idx_);
+  traversable_cells_.swap(other.traversable_cells_);
+  candidates_.swap(other.candidates_);
+  preblocked_cells_.swap(other.preblocked_cells_);
+  cliff_cells_.swap(other.cliff_cells_);
+  external_preblocked_cells_.swap(other.external_preblocked_cells_);
+  preblocked_costmap_.swap(other.preblocked_costmap_);
+}
+
 void OctoPlannerCore::rebuildPreblockedCells()
 {
   preblocked_cells_.clear();

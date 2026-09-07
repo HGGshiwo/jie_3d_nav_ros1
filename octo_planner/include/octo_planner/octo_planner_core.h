@@ -164,6 +164,7 @@ public:
   void rebuildDerivedLayers();
   void rebuildPreblockedCostmap();
   void rebuildAllLayers();
+  void swapLayersAndMap(OctoPlannerCore& other);
 
   std::unordered_set<GridIndex, GridIndexHash> getPreblockedCells() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);

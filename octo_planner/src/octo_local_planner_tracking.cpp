@@ -238,12 +238,17 @@ void OctoLocalPlanner::processOctomapAsync(const octomap_msgs::Octomap::ConstPtr
   std::shared_ptr<octomap::OcTree> octree(dynamic_cast<octomap::OcTree *>(octomap_msgs::msgToMap(*msg)));
   if (octree)
   {
-    std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
-    active_octree_ = octree;
-    planner_.setOctree(active_octree_);
-    planner_.rebuildPreblockedCells();
-    map_ready_ = true;
-    map_changed_ = true;
+    bg_planner_.setOctree(octree);
+    bg_planner_.rebuildPreblockedCells();
+
+    // Fast pointer/layer swap with main planner under lock (<0.01 ms)
+    {
+      std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
+      active_octree_ = octree;
+      planner_.swapLayersAndMap(bg_planner_);
+      map_ready_ = true;
+      map_changed_ = true;
+    }
   }
   else
   {

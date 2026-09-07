@@ -67,6 +67,7 @@ public:
 
 private:
   teb_local_planner::ObstContainer dummy_obstacles_;
+  bool is_warm_start_ = false;
 };
 
 } // namespace octo_planner
