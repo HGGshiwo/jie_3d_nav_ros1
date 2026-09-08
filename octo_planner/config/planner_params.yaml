@@ -23,7 +23,52 @@ corner_fillet_radius: 0.30
 enable_continuous_yaw: true
 yaw_smoothing_window: 5
 
-# Emergency stop parameters
-enable_emergency_stop_check: true
+# Emergency stop probe (OctoLocalPlanner only, D1LocalPlanner does not read it)
+enable_emergency_stop_check: false
 emergency_stop_min_occupied_voxels: 3
+robot_body_height: 0.26 # 机器狗躯干正中心相对 base_footprint 的高度偏置 (m)
 
+# ===== Local planner parameters (OctoLocalPlanner / D1LocalPlanner) =====
+# 3D Elastic Band parameters (OctoLocalPlanner only)
+eb_iterations: 25
+eb_w_smooth: 0.3
+eb_w_obstacle: 0.6
+eb_w_ground: 0.4
+eb_safe_distance: 0.55
+eb_learning_rate: 0.1
+
+# Path tracking geometry
+lookahead_distance: 1.00
+robot_center_offset_frame: base_link
+robot_center_offset_x: 0.0
+robot_center_offset_y: 0.0
+robot_center_offset_z: 0.0
+tracking_point_reached_xy_tolerance: 0.40
+tracking_point_marker_scale: 0.28
+
+# OpenCV top-down debug view
+enable_tracking_debug_view: false
+tracking_debug_view_size_px: 640
+tracking_debug_view_pixels_per_meter: 80.0
+tracking_debug_view_frequency: 10.0
+
+# Speed tracking gains
+linear_gain: 1.5
+lateral_gain: 0.4
+heading_gain: 1.2
+cross_track_angular_gain: 0.5
+final_yaw_gain: 0.3
+
+# Motion mode and limits
+enable_lateral_motion: true
+max_linear_speed: 0.7
+max_lateral_speed: 0.5
+max_angular_speed: 0.9
+
+# Deadbands and goal tolerances
+align_final_yaw: true
+linear_deadband: 0.01
+lateral_deadband: 0.01
+angular_deadband: 0.01
+goal_position_tolerance: 0.3
+goal_yaw_tolerance: 0.3
