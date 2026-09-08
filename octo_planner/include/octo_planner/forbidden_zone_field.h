@@ -17,7 +17,7 @@ namespace octo_planner
  */
 struct ForbiddenZoneParams
 {
-  double resolution = 0.05;         ///< 2D grid resolution (meters)
+  double resolution = 0.10;         ///< 2D grid resolution (meters)
   double local_window_radius = 4.0; ///< Half-width of local evaluation field window (meters)
   double exterior_cost_base = 1.0;  ///< Saturated cost for cells outside traversable terrain / cliff
   double exterior_gradient_alpha = 1.5; ///< Pull-back gradient strength for exterior/void cells
@@ -76,6 +76,7 @@ private:
   int grid_height_ = 0;
 
   // Dense 2D buffers (Row-major: idx = y * width + x)
+  double effective_resolution_ = 0.10;
   std::vector<float> cost_grid_;
   std::vector<float> height_grid_;
   std::vector<bool>  traversable_mask_;

@@ -187,6 +187,17 @@ public:
     return preblocked_costmap_;
   }
 
+  double getResolution() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return octree_ ? octree_->getResolution() : 0.0;
+  }
+
+  template <typename Func>
+  void withLayers(Func&& func) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    func(traversable_cells_, preblocked_cells_, preblocked_costmap_);
+  }
+
   // Coordinates converters
   GridIndex worldToGrid(double x, double y, double z) const;
   octomap::point3d gridToWorld(const GridIndex & idx) const;

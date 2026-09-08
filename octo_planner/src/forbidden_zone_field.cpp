@@ -7,12 +7,15 @@ namespace octo_planner
 {
 
 ForbiddenZoneField::ForbiddenZoneField()
+  : effective_resolution_(params_.resolution)
 {
 }
 
 void ForbiddenZoneField::updateField(const OctoPlannerCore& core, double center_x, double center_y)
 {
-  const double res = params_.resolution;
+  const double core_res = core.getResolution();
+  effective_resolution_ = (core_res > 1e-4) ? std::max(params_.resolution, core_res) : params_.resolution;
+  const double res = effective_resolution_;
   const double half_w = params_.local_window_radius;
 
   origin_x_ = center_x - half_w;
@@ -27,45 +30,65 @@ void ForbiddenZoneField::updateField(const OctoPlannerCore& core, double center_
   pullback_dir_x_.assign(total_cells, 0.0f);
   pullback_dir_y_.assign(total_cells, 0.0f);
 
-  const auto& preblocked = core.getPreblockedCells();
-  const auto& traversable = core.getTraversableCells();
-
-  // 1. First pass: Project 3D traversable surface and preblocked layers onto local 2D grid
-  for (const auto& t_cell : traversable)
+  // Calculate integer AABB bounds in OctoTree GridIndex space for early culling
+  bool use_aabb = false;
+  int min_gx = 0, max_gx = 0, min_gy = 0, max_gy = 0;
+  if (core_res > 1e-4)
   {
-    octomap::point3d pt = core.gridToWorld(t_cell);
-    int gx = static_cast<int>(std::round((pt.x() - origin_x_) / res));
-    int gy = static_cast<int>(std::round((pt.y() - origin_y_) / res));
+    use_aabb = true;
+    min_gx = static_cast<int>(std::floor((center_x - half_w - res) / core_res)) - 1;
+    max_gx = static_cast<int>(std::ceil((center_x + half_w + res) / core_res)) + 1;
+    min_gy = static_cast<int>(std::floor((center_y - half_w - res) / core_res)) - 1;
+    max_gy = static_cast<int>(std::ceil((center_y + half_w + res) / core_res)) + 1;
+  }
 
-    if (isInsideGrid(gx, gy))
+  // 1. First pass: Zero-copy read under lock, integer AABB pre-culled projection
+  core.withLayers([&](const std::unordered_set<GridIndex, GridIndexHash>& traversable,
+                      const std::unordered_set<GridIndex, GridIndexHash>& preblocked,
+                      const std::unordered_map<GridIndex, double, GridIndexHash>& costmap)
+  {
+    for (const auto& t_cell : traversable)
     {
-      int idx = toIndex(gx, gy);
-      traversable_mask_[idx] = true;
-      height_grid_[idx] = pt.z();
-
-      // Query core's preblocked cost field
-      double cst = core.getPreblockedCost(t_cell);
-      if (preblocked.find(t_cell) != preblocked.end())
+      if (use_aabb && (t_cell.x < min_gx || t_cell.x > max_gx || t_cell.y < min_gy || t_cell.y > max_gy))
       {
-        cst = std::max(cst, 1.0);
+        continue;
       }
-      cost_grid_[idx] = static_cast<float>(std::max(static_cast<double>(cost_grid_[idx]), cst));
+
+      octomap::point3d pt = core.gridToWorld(t_cell);
+      int gx = static_cast<int>(std::round((pt.x() - origin_x_) / res));
+      int gy = static_cast<int>(std::round((pt.y() - origin_y_) / res));
+
+      if (isInsideGrid(gx, gy))
+      {
+        int idx = toIndex(gx, gy);
+        traversable_mask_[idx] = true;
+        height_grid_[idx] = pt.z();
+
+        auto it = costmap.find(t_cell);
+        double cst = (it != costmap.end()) ? it->second : 0.0;
+        cost_grid_[idx] = static_cast<float>(std::max(static_cast<double>(cost_grid_[idx]), cst));
+      }
     }
-  }
 
-  // Also stamp preblocked cells within local bounding window
-  for (const auto& p_cell : preblocked)
-  {
-    octomap::point3d pt = core.gridToWorld(p_cell);
-    int gx = static_cast<int>(std::round((pt.x() - origin_x_) / res));
-    int gy = static_cast<int>(std::round((pt.y() - origin_y_) / res));
-
-    if (isInsideGrid(gx, gy))
+    // Stamp preblocked cells within local bounding window
+    for (const auto& p_cell : preblocked)
     {
-      int idx = toIndex(gx, gy);
-      cost_grid_[idx] = 1.0f;
+      if (use_aabb && (p_cell.x < min_gx || p_cell.x > max_gx || p_cell.y < min_gy || p_cell.y > max_gy))
+      {
+        continue;
+      }
+
+      octomap::point3d pt = core.gridToWorld(p_cell);
+      int gx = static_cast<int>(std::round((pt.x() - origin_x_) / res));
+      int gy = static_cast<int>(std::round((pt.y() - origin_y_) / res));
+
+      if (isInsideGrid(gx, gy))
+      {
+        int idx = toIndex(gx, gy);
+        cost_grid_[idx] = 1.0f;
+      }
     }
-  }
+  });
 
   // 2. Second pass: Breadth-First Search (BFS) distance transform for Exterior Void (Defect 4)
   // Compute distance to nearest safe traversable cell and pull-back vector
@@ -159,7 +182,7 @@ bool ForbiddenZoneField::evaluateCostAndGradient(double x, double y, double& cos
     return false;
   }
 
-  const double res = params_.resolution;
+  const double res = effective_resolution_;
   const double inv_res = 1.0 / res;
   const double uf = (x - origin_x_) * inv_res;
   const double vf = (y - origin_y_) * inv_res;
@@ -232,7 +255,7 @@ bool ForbiddenZoneField::getTerrainHeight(double x, double y, double& z) const
 {
   if (!initialized_) return false;
 
-  const double res = params_.resolution;
+  const double res = effective_resolution_;
   const int i = static_cast<int>(std::round((x - origin_x_) / res));
   const int j = static_cast<int>(std::round((y - origin_y_) / res));
 

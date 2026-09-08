@@ -145,6 +145,12 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   // TEB Optimizer & Footprint Parameters
   private_nh.param<bool>("use_teb_optimizer", use_teb_optimizer_, true);
   private_nh.param<double>("weight_forbidden_zone", weight_forbidden_zone_, 2.0);
+  double forbidden_zone_resolution = 0.10;
+  private_nh.param<double>("forbidden_zone_resolution", forbidden_zone_resolution, 0.10);
+  ForbiddenZoneParams fz_params;
+  fz_params.resolution = forbidden_zone_resolution;
+  forbidden_field_.setParams(fz_params);
+
   private_nh.param<double>("footprint_front_offset", footprint_front_offset_, 0.25);
   private_nh.param<double>("footprint_front_radius", footprint_front_radius_, 0.20);
   private_nh.param<double>("footprint_rear_offset", footprint_rear_offset_, 0.25);
