@@ -17,7 +17,7 @@ OctoLocalPlanner:
   tracking_point_marker_scale: 0.28
 
   # OpenCV top-down debug view
-  enable_tracking_debug_view: true
+  enable_tracking_debug_view: false
   tracking_debug_view_size_px: 640
   tracking_debug_view_pixels_per_meter: 80.0
   tracking_debug_view_frequency: 10.0
@@ -44,7 +44,7 @@ OctoLocalPlanner:
   goal_yaw_tolerance: 0.3
 
   # Emergency Stop Probe
-  enable_emergency_stop_check: true
+  enable_emergency_stop_check: false
   emergency_stop_min_occupied_voxels: 3
   robot_body_height: 0.26 # 机器狗躯干正中心相对 base_footprint 的高度偏置 (m)
 
@@ -59,7 +59,7 @@ D1LocalPlanner:
   tracking_point_marker_scale: 0.28
 
   # OpenCV top-down debug view
-  enable_tracking_debug_view: true
+  enable_tracking_debug_view: false
   tracking_debug_view_size_px: 640
   tracking_debug_view_pixels_per_meter: 80.0
   tracking_debug_view_frequency: 10.0

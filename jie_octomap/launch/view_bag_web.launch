@@ -1,0 +1,33 @@
+<launch>
+    <!-- 仿真时钟：回放 bag 时必须开启 -->
+    <param name="/use_sim_time" value="true" />
+
+    <!-- 1. Bag 回放控制参数 -->
+    <arg name="bag_file" default="" />
+    <arg name="bag_rate" default="1.0" />
+    <arg name="bag_start" default="0.0" />
+    <arg name="bag_loop" default="false" />
+
+    <!-- 2. Web 3D 可视化服务端 (FastAPI, 端口 8008, 零算法开销纯回放查看) -->
+    <node pkg="jie_octomap" type="map_viewer_server" name="map_viewer_server" output="screen">
+        <param name="occupied_marker_topic" value="/octomap_global_markers" />
+        <param name="octomap_local_topic" value="/octomap_local_markers" />
+        <param name="octomap_fused_topic" value="/octomap_fused_markers" />
+        <param name="emergency_stop_topic" value="/move_base/OctoLocalPlanner/emergency_stop_markers" />
+        <param name="traversable_marker_topic" value="/move_base/traversable_cells" />
+        <param name="preblocked_marker_topic" value="/move_base/preblocked_cells" />
+        <param name="risk_cost_topic" value="/move_base/risk_cost_cloud" />
+        <param name="path_topic" value="/move_base/plan" />
+        <param name="local_path_topic" value="/move_base/local_plan" />
+        <param name="status_text_topic" value="/move_base/status_text" />
+        <param name="odom_topic" value="/loc_base" />
+        <param name="publish_fake_tf" value="false" />
+        <param name="tf_parent_frame" value="map" />
+        <param name="tf_child_frame" value="base_footprint" />
+    </node>
+
+    <!-- 3. 当传入 bag_file 时自动启动回放 -->
+    <node unless="$(eval arg('bag_file') == '')" pkg="rosbag" type="play" name="rosbag_player" output="screen"
+          args="--clock -r $(arg bag_rate) -s $(arg bag_start) $(eval '--loop' if arg('bag_loop') else '') $(arg bag_file)" />
+
+</launch>
