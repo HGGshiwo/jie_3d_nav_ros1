@@ -1,4 +1,4 @@
-robot_radius: 0.25
+robot_radius: 0.3
 max_iterations: 500000
 snap_search_radius_cells: 12
 require_ground_support: true

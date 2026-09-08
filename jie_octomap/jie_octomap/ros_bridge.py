@@ -11,18 +11,47 @@ ROS 通信与状态管理桥接模块 (ROS Bridge)
 
 import os
 import time
+import math
+import random
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 
 import rospy
 import tf2_ros
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point, PointStamped, PoseStamped, TransformStamped
+from geometry_msgs.msg import Point, PointStamped, PoseStamped, TransformStamped, Twist, Quaternion
 from nav_msgs.msg import Path as ROSPath, Odometry
 from move_base_msgs.msg import MoveBaseActionGoal
+from actionlib_msgs.msg import GoalID
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from std_msgs.msg import String
+
+
+def euler_to_quaternion(roll: float, pitch: float, yaw: float) -> Quaternion:
+    """欧拉角转四元数"""
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+
+    q = Quaternion()
+    q.w = cr * cp * cy + sr * sp * sy
+    q.x = sr * cp * cy - cr * sp * sy
+    q.y = cr * sp * cy + sr * cp * sy
+    q.z = cr * cp * sy - sr * sp * cy
+    return q
+
+
+def normalize_angle(angle: float) -> float:
+    """归一化角度到 [-pi, pi]"""
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
 
 
 def parse_marker_or_array(msg: Any) -> Dict[str, Any]:
@@ -88,7 +117,20 @@ class RosBridge:
         self.tf_listener = None
         self.tf_broadcaster = None
         self.publish_fake_tf = False
-        self.fake_robot_pose = None
+
+        # 仿真运动学与位姿状态 (当 publish_fake_tf=True 时启用动态积分)
+        self.sim_x = 0.0
+        self.sim_y = 0.0
+        self.sim_z = 0.0
+        self.sim_yaw = 0.0
+        self.cmd_vx = 0.0
+        self.cmd_vy = 0.0
+        self.cmd_wz = 0.0
+        self.last_cmd_time = None
+        self.last_sim_time = None
+        self.linear_noise_std = 0.008
+        self.lateral_noise_std = 0.008
+        self.angular_noise_std = 0.006
         
         # ROS 发布者
         self.ros_pubs: Dict[str, rospy.Publisher] = {}
@@ -105,6 +147,8 @@ class RosBridge:
         self.ros_pubs["goal_pose_pub"] = rospy.Publisher("/goal_pose", PoseStamped, queue_size=1, latch=True)
         self.ros_pubs["move_base_simple_goal"] = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=1, latch=True)
         self.ros_pubs["move_base_action_goal"] = rospy.Publisher("/move_base/goal", MoveBaseActionGoal, queue_size=1, latch=True)
+        self.ros_pubs["cancel_pub"] = rospy.Publisher("/move_base/cancel", GoalID, queue_size=1)
+        self.ros_pubs["odom_pub"] = rospy.Publisher("/loc_base", Odometry, queue_size=10)
 
         # 2. 获取话题参数
         occupied_topic = rospy.get_param("~occupied_marker_topic", "/octomap_occupied_markers")
@@ -117,7 +161,15 @@ class RosBridge:
         path_topic = rospy.get_param("~path_topic", "/move_base/plan")
         local_path_topic = rospy.get_param("~local_path_topic", "/move_base/local_plan")
         odom_topic = rospy.get_param("~odom_topic", "/loc_base")
+        cmd_vel_topic = rospy.get_param("~cmd_vel_topic", "/cmd_vel")
         status_text_topic = rospy.get_param("~status_text_topic", "/move_base/status_text")
+        self.linear_noise_std = rospy.get_param("~linear_noise_std", 0.008)
+        self.lateral_noise_std = rospy.get_param("~lateral_noise_std", 0.008)
+        self.angular_noise_std = rospy.get_param("~angular_noise_std", 0.006)
+        self.sim_x = rospy.get_param("~init_x", 0.0)
+        self.sim_y = rospy.get_param("~init_y", 0.0)
+        self.sim_z = rospy.get_param("~init_z", 0.0)
+        self.sim_yaw = rospy.get_param("~init_yaw", 0.0)
         self.publish_fake_tf = rospy.get_param("~publish_fake_tf", False)
 
         # 3. 初始化 TF2
@@ -126,9 +178,8 @@ class RosBridge:
         self.tf_broadcaster = tf2_ros.TransformBroadcaster()
 
         if self.publish_fake_tf:
-            if self.fake_robot_pose is None:
-                self.fake_robot_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
-            rospy.Timer(rospy.Duration(0.05), self.publish_fake_tf_loop)
+            self.last_sim_time = rospy.Time.now()
+            rospy.Timer(rospy.Duration(0.02), self.publish_fake_tf_loop) # 50Hz 高频广播与积分
 
         # 4. 注册订阅者
         rospy.Subscriber(occupied_topic, MarkerArray, self._occupied_callback)
@@ -141,9 +192,82 @@ class RosBridge:
         rospy.Subscriber(path_topic, ROSPath, self._path_callback)
         rospy.Subscriber(local_path_topic, ROSPath, self._local_path_callback)
         rospy.Subscriber(odom_topic, Odometry, self._odom_callback)
+        rospy.Subscriber(cmd_vel_topic, Twist, self._cmd_vel_callback)
         rospy.Subscriber(status_text_topic, String, self._status_text_callback)
         
         print(f"[RosBridge] ROS 节点已启动，监听话题就绪 (publish_fake_tf={self.publish_fake_tf})", flush=True)
+
+    def get_terrain_z(self, x: float, y: float, fallback_z: float) -> float:
+        """
+        基于真实 Octomap 3D 地形点云计算 (x, y) 处的地表高度 z：
+        1. 优先直接探测 Octomap 网格 (traversable / fused_octomap / occupied) 在机体底盘投影下方的真实地面高度
+        2. 若局部网格处于盲区或未建图，则回退参考规划路径中的 3D 贴地高度
+        3. 无法查到时回退到 fallback_z
+        """
+        # 1. 优先从 Octomap 真实地图数据层探测脚下地面高度
+        search_layers = ["traversable", "fused_octomap", "occupied", "local_octomap"]
+        best_z = None
+        min_sq = 0.35 * 0.35  # 机体半径范围 (35cm)
+
+        for layer_name in search_layers:
+            data = self.latest_ros_data.get(layer_name)
+            if not data or not data.get("groups"):
+                continue
+
+            for g in data["groups"]:
+                pts = g.get("points", [])
+                sc_z = g.get("scale", [0.2, 0.2, 0.2])[2] if g.get("scale") else 0.2
+                for p in pts:
+                    # 仅探测底盘下方到微小台阶范围内的地面 (过滤掉高于机体的天花板或障碍物)
+                    if p[2] > fallback_z + 0.5 or p[2] < fallback_z - 1.8:
+                        continue
+                    dx = p[0] - x
+                    dy = p[1] - y
+                    sq = dx * dx + dy * dy
+                    if sq < min_sq:
+                        min_sq = sq
+                        # 若为可通行网格，直接为行走面；若为占据体素，取顶表面高度
+                        best_z = p[2] if layer_name == "traversable" else (p[2] + sc_z * 0.5)
+
+            if best_z is not None:
+                return best_z
+
+        # 2. 次选：局部盲区无体素时，回退参考规划路径的 3D 航路点高度
+        for path_points in [self.latest_local_path, self.latest_planned_path]:
+            if path_points:
+                min_path_sq = 0.8 * 0.8
+                path_z = None
+                for pt in path_points:
+                    dx = pt[0] - x
+                    dy = pt[1] - y
+                    sq = dx * dx + dy * dy
+                    if sq < min_path_sq:
+                        min_path_sq = sq
+                        path_z = pt[2]
+                if path_z is not None:
+                    return path_z
+
+        return fallback_z
+
+    def set_sim_pose(self, x: float, y: float, z: float, yaw: Optional[float] = None):
+        """前端修改初始位置时，自动吸附贴地高度，瞬间同步并立即更新 TF"""
+        self.sim_x = float(x)
+        self.sim_y = float(y)
+        # 自动吸附贴地高度
+        terrain_z = self.get_terrain_z(self.sim_x, self.sim_y, float(z))
+        self.sim_z = terrain_z
+        if yaw is not None:
+            self.sim_yaw = float(yaw)
+        self.cmd_vx, self.cmd_vy, self.cmd_wz = 0.0, 0.0, 0.0
+        self.last_sim_time = rospy.Time.now()
+        if self.publish_fake_tf:
+            self.publish_fake_tf_loop()
+
+    def _cmd_vel_callback(self, msg: Twist):
+        self.cmd_vx = msg.linear.x
+        self.cmd_vy = msg.linear.y
+        self.cmd_wz = msg.angular.z
+        self.last_cmd_time = rospy.Time.now()
 
     # ------------------ 内部回调 ------------------
     def _status_text_callback(self, msg: String):
@@ -240,45 +364,84 @@ class RosBridge:
         except Exception as e:
             print(f"[risk_cost_callback] Error: {e}")
 
-    # ------------------ 伪 TF 广播 ------------------
+    # ------------------ 仿真运动学积分与 TF/Odom 高频广播 ------------------
     def publish_fake_tf_loop(self, event=None):
-        if not self.publish_fake_tf or self.tf_broadcaster is None or self.fake_robot_pose is None:
+        if not self.publish_fake_tf or self.tf_broadcaster is None:
             return
         try:
             now_stamp = rospy.Time.now()
-            child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
             
+            # 运动学积分更新
+            if self.last_sim_time is not None:
+                dt = (now_stamp - self.last_sim_time).to_sec()
+                if 0.0 < dt < 0.5:
+                    if self.last_cmd_time is not None and (now_stamp - self.last_cmd_time).to_sec() <= 0.5:
+                        vx, vy, wz = self.cmd_vx, self.cmd_vy, self.cmd_wz
+                        is_moving = abs(vx) > 1e-4 or abs(vy) > 1e-4 or abs(wz) > 1e-4
+                        if is_moving:
+                            noisy_vx = vx + random.gauss(0.0, self.linear_noise_std)
+                            noisy_vy = vy + random.gauss(0.0, self.lateral_noise_std)
+                            noisy_wz = wz + random.gauss(0.0, self.angular_noise_std)
+                        else:
+                            noisy_vx, noisy_vy, noisy_wz = 0.0, 0.0, 0.0
+                    else:
+                        noisy_vx, noisy_vy, noisy_wz = 0.0, 0.0, 0.0
+
+                    cos_y = math.cos(self.sim_yaw)
+                    sin_y = math.sin(self.sim_yaw)
+                    dx_body = noisy_vx * dt
+                    dy_body = noisy_vy * dt
+                    dyaw = noisy_wz * dt
+
+                    self.sim_x += dx_body * cos_y - dy_body * sin_y
+                    self.sim_y += dx_body * sin_y + dy_body * cos_y
+                    self.sim_yaw = normalize_angle(self.sim_yaw + dyaw)
+
+                    # 动态自动跟随 3D 地形与规划路径的 z 高度 (平滑低通滤波过渡)
+                    target_z = self.get_terrain_z(self.sim_x, self.sim_y, self.sim_z)
+                    self.sim_z = 0.85 * self.sim_z + 0.15 * target_z
+            
+            self.last_sim_time = now_stamp
+            q = euler_to_quaternion(0.0, 0.0, self.sim_yaw)
+
+            # 1. 广播 TF 变换树: map -> odom -> base_footprint / base_link / odin1_base_link
+            child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
+            candidates = list(dict.fromkeys([child_frame, "base_footprint", "base_link", "odin1_base_link"]))
+
             t_map_odom = TransformStamped()
             t_map_odom.header.stamp = now_stamp
             t_map_odom.header.frame_id = "map"
             t_map_odom.child_frame_id = "odom"
             t_map_odom.transform.rotation.w = 1.0
 
-            # 广播 odom -> child_frame (默认 base_footprint)
-            t_odom_footprint = TransformStamped()
-            t_odom_footprint.header.stamp = now_stamp
-            t_odom_footprint.header.frame_id = "odom"
-            t_odom_footprint.child_frame_id = child_frame
-            t_odom_footprint.transform.translation.x = self.fake_robot_pose["x"]
-            t_odom_footprint.transform.translation.y = self.fake_robot_pose["y"]
-            t_odom_footprint.transform.translation.z = self.fake_robot_pose["z"]
-            t_odom_footprint.transform.rotation.w = 1.0
-
-            # 增加 base_link 的 TF 变换（和 base_footprint 完全一致）
-            t_odom_baselink = TransformStamped()
-            t_odom_baselink.header.stamp = now_stamp
-            t_odom_baselink.header.frame_id = "odom"
-            t_odom_baselink.child_frame_id = "base_link"
-            t_odom_baselink.transform.translation.x = self.fake_robot_pose["x"]
-            t_odom_baselink.transform.translation.y = self.fake_robot_pose["y"]
-            t_odom_baselink.transform.translation.z = self.fake_robot_pose["z"]
-            t_odom_baselink.transform.rotation.w = 1.0
-
-            transforms = [t_map_odom, t_odom_footprint]
-            if child_frame != "base_link":
-                transforms.append(t_odom_baselink)
+            transforms = [t_map_odom]
+            for frame_name in candidates:
+                t_odom = TransformStamped()
+                t_odom.header.stamp = now_stamp
+                t_odom.header.frame_id = "odom"
+                t_odom.child_frame_id = frame_name
+                t_odom.transform.translation.x = self.sim_x
+                t_odom.transform.translation.y = self.sim_y
+                t_odom.transform.translation.z = self.sim_z
+                t_odom.transform.rotation = q
+                transforms.append(t_odom)
 
             self.tf_broadcaster.sendTransform(transforms)
+
+            # 2. 发布 /loc_base 里程计
+            if "odom_pub" in self.ros_pubs:
+                odom_msg = Odometry()
+                odom_msg.header.stamp = now_stamp
+                odom_msg.header.frame_id = "map"
+                odom_msg.child_frame_id = child_frame
+                odom_msg.pose.pose.position.x = self.sim_x
+                odom_msg.pose.pose.position.y = self.sim_y
+                odom_msg.pose.pose.position.z = self.sim_z
+                odom_msg.pose.pose.orientation = q
+                odom_msg.twist.twist.linear.x = self.cmd_vx
+                odom_msg.twist.twist.linear.y = self.cmd_vy
+                odom_msg.twist.twist.angular.z = self.cmd_wz
+                self.ros_pubs["odom_pub"].publish(odom_msg)
         except Exception:
             pass
 
@@ -331,7 +494,11 @@ class RosBridge:
         return res
 
     def lookup_robot_pose(self) -> Tuple[bool, Optional[Dict], Optional[Dict]]:
-        """获取当前机器人位姿，优先 Odom，其次 TF"""
+        """获取当前机器人位姿，若开启 publish_fake_tf 则直接返回仿真位姿，否则优先 Odom，其次 TF"""
+        if self.publish_fake_tf:
+            q = euler_to_quaternion(0.0, 0.0, self.sim_yaw)
+            return True, {"x": self.sim_x, "y": self.sim_y, "z": self.sim_z}, {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+
         if self.latest_odom_pose is not None:
             p = self.latest_odom_pose.position
             o = self.latest_odom_pose.orientation

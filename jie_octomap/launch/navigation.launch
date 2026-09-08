@@ -9,8 +9,16 @@
     <arg name="map_topic" default="" />
     <arg name="use_rviz" default="true" />
 
-    <!-- 设置为 true 时，网页上手动设置起点会自动广播 map -> base_footprint 的伪 TF 变换（用于无定位硬件调试） -->
-    <arg name="publish_fake_tf" default="true" />
+    <!-- 仿真模式主开关：默认为 true（仿真模式）。通过 navigation_real.launch 或 sim:=false 可切换为实机模式 -->
+    <arg name="sim" default="true" />
+    <arg name="sim_init_x" default="0.0" />
+    <arg name="sim_init_y" default="0.0" />
+    <arg name="sim_init_z" default="0.0" />
+    <arg name="sim_init_yaw" default="0.0" />
+    <!-- 仿真运动噪声标准差 (线速度 m/s, 角速度 rad/s) -->
+    <arg name="sim_noise_linear" default="0.008" />
+    <arg name="sim_noise_lateral" default="0.008" />
+    <arg name="sim_noise_angular" default="0.006" />
 
     <!-- 1. 全局地图生成节点 (按参数条件分发) -->
     <!-- Case A: 载入预构建的离线 Octomap 包 -->
@@ -97,7 +105,14 @@
         <param name="risk_cost_topic" value="/move_base/risk_cost_cloud" />
         <param name="path_topic" value="/move_base/plan" />
         <param name="odom_topic" value="/loc_base" />
-        <param name="publish_fake_tf" value="$(arg publish_fake_tf)" />
+        <param name="publish_fake_tf" value="$(arg sim)" />
+        <param name="linear_noise_std" value="$(arg sim_noise_linear)" />
+        <param name="lateral_noise_std" value="$(arg sim_noise_lateral)" />
+        <param name="angular_noise_std" value="$(arg sim_noise_angular)" />
+        <param name="init_x" value="$(arg sim_init_x)" />
+        <param name="init_y" value="$(arg sim_init_y)" />
+        <param name="init_z" value="$(arg sim_init_z)" />
+        <param name="init_yaw" value="$(arg sim_init_yaw)" />
         <param name="query_cell_debug_service" value="/move_base/query_cell_debug_info" />
     </node>
 

@@ -97,7 +97,10 @@
             <label><input type="checkbox" id="show-emergency-stop"> 紧急制动探针</label>
             <label><input type="checkbox" id="show-robot" checked> 狗定位(蓝)</label>
         </div>
-        <button id="btn-focus-robot" class="btn-sync" style="background:#009688;">视角对准机器人</button>
+        <div style="display: flex; gap: 8px; margin-top: 8px;">
+            <button id="btn-focus-robot" class="btn-sync" style="background:#009688; margin-top:0; flex:1;">对准机器人</button>
+            <button id="btn-cancel-goal" class="btn-sync btn-danger" style="margin-top:0; flex:1;">取消导航目标</button>
+        </div>
         <button id="btn-sync" class="btn-sync">实时同步至 ROS</button>
         <button id="btn-save" class="btn-sync" style="background:#FF9800;">永久保存地图</button>
         <div id="status" style="margin-top: 10px; font-size: 12px; color: #8bc34a;">就绪</div>

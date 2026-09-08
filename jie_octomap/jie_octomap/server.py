@@ -25,6 +25,7 @@ from pydantic import BaseModel
 import rospy
 from geometry_msgs.msg import PointStamped, PoseStamped
 from move_base_msgs.msg import MoveBaseActionGoal
+from actionlib_msgs.msg import GoalID
 from jie_map_msgs.srv import (
     LoadNavigationMapPackage, LoadNavigationMapPackageRequest,
     SaveNavigationMapPackage, SaveNavigationMapPackageRequest,
@@ -358,11 +359,24 @@ async def set_start(req: PointRequest):
     msg.point.x, msg.point.y, msg.point.z = req.x, req.y, req.z
     ros_bridge.ros_pubs["start_pub"].publish(msg)
 
-    if ros_bridge.publish_fake_tf:
-        ros_bridge.fake_robot_pose = {"x": req.x, "y": req.y, "z": req.z}
-        ros_bridge.publish_fake_tf_loop()
+    # 迅速修改仿真位姿并立即更新 TF 与 /loc_base
+    ros_bridge.set_sim_pose(req.x, req.y, req.z)
 
     return {"status": "success", "message": f"起点已设定为: [{req.x:.2f}, {req.y:.2f}, {req.z:.2f}]"}
+
+
+@app.post("/api/cancel_goal")
+async def cancel_goal():
+    """取消 move_base 导航目标并刹车"""
+    if "cancel_pub" not in ros_bridge.ros_pubs:
+        raise HTTPException(status_code=500, detail="ROS 取消发布器未启动")
+
+    cancel_msg = GoalID()
+    ros_bridge.ros_pubs["cancel_pub"].publish(cancel_msg)
+    
+    # 清空仿真速度
+    ros_bridge.cmd_vx, ros_bridge.cmd_vy, ros_bridge.cmd_wz = 0.0, 0.0, 0.0
+    return {"status": "success", "message": "已成功向 move_base 发送取消导航目标指令！"}
 
 
 @app.post("/api/set_goal")

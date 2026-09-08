@@ -4,7 +4,7 @@
         <!-- <arg name="global_octomap_path" value="/home/unitree/catkin_ws2/src/map-segment" /> -->
         <arg name="global_octomap_path" value="/home/unitree/catkin_ws2/src/map-segmentpatch" />
         <!-- <arg name="global_octomap_path" value="/home/unitree/catkin_ws2/src/map-segment0.05" /> -->
-        <arg name="publish_fake_tf" value="false" />
+        <arg name="sim" value="false" />
     </include>
     
     <node pkg="tf2_ros" type="static_transform_publisher" name="lidar_to_hesai_broadcaster"

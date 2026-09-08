@@ -625,6 +625,24 @@ if (btnFocusRobot) {
     btnFocusRobot.addEventListener('click', focusOnRobot);
 }
 
+const btnCancelGoal = document.getElementById('btn-cancel-goal');
+if (btnCancelGoal) {
+    btnCancelGoal.addEventListener('click', async () => {
+        if (statusEl) statusEl.innerText = "正在请求取消导航目标...";
+        try {
+            const res = await fetch('/api/cancel_goal', { method: 'POST' });
+            if (res.ok) {
+                const data = await res.json();
+                if (statusEl) statusEl.innerText = data.message;
+            } else {
+                if (statusEl) statusEl.innerText = "取消导航目标失败";
+            }
+        } catch (err) {
+            if (statusEl) statusEl.innerText = `取消导航目标异常: ${err.message}`;
+        }
+    });
+}
+
 // ---- 4. 全双工 WebSocket 实时数据流系统 (彻底替代多路 HTTP 短轮询与 pending) ----
 const clientLayerVersions = {};
 let liveWs = null;

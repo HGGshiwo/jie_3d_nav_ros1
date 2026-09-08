@@ -295,8 +295,8 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     return true;
   }
 
-  // Extract local band
-  int nearest_idx = findInitialTargetIndex3D();
+  // Extract local band strictly forward starting from projected segment
+  int seg_idx = findInitialTargetIndex3D();
   std::vector<geometry_msgs::PoseStamped> local_band;
   geometry_msgs::PoseStamped cur_pose;
   cur_pose.header.frame_id = map_frame_;
@@ -309,16 +309,18 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   local_band.push_back(cur_pose);
 
   double accumulated_dist = 0.0;
-  int idx = nearest_idx;
+  int idx = seg_idx + 1;
   while (idx < static_cast<int>(global_plan_.size()) && accumulated_dist < 1.8 && local_band.size() < 15) {
     local_band.push_back(global_plan_[idx]);
-    if (idx > nearest_idx) {
-      double dx = global_plan_[idx].pose.position.x - global_plan_[idx - 1].pose.position.x;
-      double dy = global_plan_[idx].pose.position.y - global_plan_[idx - 1].pose.position.y;
-      double dz = global_plan_[idx].pose.position.z - global_plan_[idx - 1].pose.position.z;
-      accumulated_dist += std::sqrt(dx*dx + dy*dy + dz*dz);
+    if (local_band.size() >= 2) {
+      const auto & p_prev = local_band[local_band.size() - 2].pose.position;
+      const auto & p_curr = local_band.back().pose.position;
+      accumulated_dist += std::hypot(p_curr.x - p_prev.x, p_curr.y - p_prev.y);
     }
     idx++;
+  }
+  if (local_band.size() == 1 && !global_plan_.empty()) {
+    local_band.push_back(global_plan_.back());
   }
 
   // Check if current local band segment is blocked by obstacles; if so, run 3D A* local re-planning
@@ -449,17 +451,26 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     }
   }
 
-  // Select lookahead tracking target
+  // Check goal proximity & final tracking point
+  const auto & goal_pos = global_plan_.back().pose.position;
+  const double dist_to_goal = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
+  if (target_index_ >= static_cast<int>(global_plan_.size()) - 3 && dist_to_goal < tracking_xy_tol_) {
+    pose_adjusting_ = true;
+    cmd_vel = geometry_msgs::Twist();
+    return true;
+  }
+
+  // Select lookahead tracking target on optimized local plan
   TrackingTarget target;
+  const double effective_lookahead = std::max(0.15, std::min(lookahead_distance_, dist_to_goal));
+
   int tracking_idx = 1;
   for (size_t i = 1; i < optimized_local_plan_.size(); ++i) {
     double dx = optimized_local_plan_[i].pose.position.x - robot_pose.x;
     double dy = optimized_local_plan_[i].pose.position.y - robot_pose.y;
     tracking_idx = i;
-    if (std::hypot(dx, dy) >= lookahead_distance_) break;
+    if (std::hypot(dx, dy) >= effective_lookahead) break;
   }
-
-  target_index_ = std::min(static_cast<int>(global_plan_.size()) - 1, nearest_idx + tracking_idx - 1);
 
   geometry_msgs::PoseStamped target_pose_base;
   if (!transformToBase(optimized_local_plan_[tracking_idx], target_pose_base)) return false;
@@ -467,22 +478,28 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   target.base_x = target_pose_base.pose.position.x;
   target.base_y = target_pose_base.pose.position.y;
 
-  if (target_index_ == static_cast<int>(global_plan_.size()) - 1 && 
-      std::hypot(target.base_x, target.base_y) < tracking_xy_tol_) {
-    pose_adjusting_ = true;
-    cmd_vel = geometry_msgs::Twist();
-    return true;
+  // Forward safety filter: if target in base frame is behind the robot, search forward along optimized band
+  while (target.base_x < 0.02 && tracking_idx + 1 < static_cast<int>(optimized_local_plan_.size())) {
+    tracking_idx++;
+    if (!transformToBase(optimized_local_plan_[tracking_idx], target_pose_base)) break;
+    target.base_x = target_pose_base.pose.position.x;
+    target.base_y = target_pose_base.pose.position.y;
   }
 
   // Control command calculation with acceleration smoothing via D1VelocitySmoother
-  geometry_msgs::Twist raw_cmd;
+  // Decoupled Pure Pursuit: smooth heading error & cruise speed calculation
   const double heading_error = std::atan2(target.base_y, std::max(0.05, target.base_x));
-  const double heading_factor = std::max(0.2, std::cos(heading_error));
-  raw_cmd.linear.x  = target.base_x * linear_gain_ * heading_factor;
+  const double cruise_speed  = velocity_smoother_.getParams().max_linear_speed;
+  const double corner_scale  = std::max(0.25, std::cos(heading_error));
+  const double goal_scale    = dist_to_goal < 0.6 ? std::max(0.1, dist_to_goal / 0.6) : 1.0;
+
+  geometry_msgs::Twist raw_cmd;
+  raw_cmd.linear.x  = cruise_speed * corner_scale * goal_scale;
   raw_cmd.linear.y  = enable_lateral_motion_ ? target.base_y * lateral_gain_ : 0.0;
   raw_cmd.angular.z = heading_error * heading_gain_ + target.base_y * cross_track_angular_gain_;
 
   cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
+  last_cmd_vel_ = cmd_vel;
 
   // Emergency stop check (delegated to tracking module)
   auto t_pre_emg = LocalPlannerProfiler::Clock::now();
@@ -493,6 +510,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
   if (emg_triggered)
   {
+    last_cmd_vel_ = cmd_vel;
     return true;
   }
 

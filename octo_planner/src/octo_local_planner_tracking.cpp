@@ -14,31 +14,56 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
 {
   if (global_plan_.empty()) return 0;
   RobotPose2D robot_pose;
-  if (!lookupRobotPose2D(robot_pose)) return 0;
+  if (!lookupRobotPose2D(robot_pose)) return target_index_;
 
-  int start_idx = 0;
-  int end_idx = static_cast<int>(global_plan_.size());
-  if (target_index_ > 0 && target_index_ < end_idx)
+  const std::size_t plan_size = global_plan_.size();
+  if (plan_size <= 1)
   {
-    start_idx = std::max(0, target_index_ - 30);
-    end_idx = std::min(static_cast<int>(global_plan_.size()), target_index_ + 100);
+    target_index_ = 0;
+    return 0;
   }
 
-  int nearest = start_idx;
-  double nearest_sq = std::numeric_limits<double>::max();
-  for (int i = start_idx; i < end_idx; ++i)
+  int best_seg_idx = target_index_;
+  if (best_seg_idx < 0 || best_seg_idx >= static_cast<int>(plan_size) - 1)
   {
-    const auto & p = global_plan_[i].pose.position;
-    const double sq = (p.x - robot_pose.x)*(p.x - robot_pose.x) +
-                      (p.y - robot_pose.y)*(p.y - robot_pose.y) +
-                      (p.z - robot_pose.z)*(p.z - robot_pose.z);
-    if (sq < nearest_sq)
+    best_seg_idx = 0;
+  }
+
+  // Tight search window around previous target_index_ to guarantee forward progression
+  const int search_start = std::max(0, best_seg_idx - 2);
+  const int search_end = std::min(static_cast<int>(plan_size) - 1, best_seg_idx + 40);
+
+  double min_proj_sq_dist = std::numeric_limits<double>::max();
+
+  for (int i = search_start; i < search_end; ++i)
+  {
+    const auto & p1 = global_plan_[i].pose.position;
+    const auto & p2 = global_plan_[i + 1].pose.position;
+    const double dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
+    const double seg_sq_len = dx * dx + dy * dy + dz * dz;
+
+    double t = 0.0;
+    if (seg_sq_len > 1.0e-6)
     {
-      nearest_sq = sq;
-      nearest = i;
+      t = ((robot_pose.x - p1.x) * dx + (robot_pose.y - p1.y) * dy + (robot_pose.z - p1.z) * dz) / seg_sq_len;
+      t = std::max(0.0, std::min(1.0, t));
+    }
+    const double px = p1.x + t * dx;
+    const double py = p1.y + t * dy;
+    const double pz = p1.z + t * dz;
+    const double sq_dist = (robot_pose.x - px) * (robot_pose.x - px) +
+                          (robot_pose.y - py) * (robot_pose.y - py) +
+                          (robot_pose.z - pz) * (robot_pose.z - pz);
+
+    if (sq_dist < min_proj_sq_dist)
+    {
+      min_proj_sq_dist = sq_dist;
+      best_seg_idx = i;
     }
   }
-  return nearest;
+
+  target_index_ = best_seg_idx;
+  return target_index_;
 }
 
 bool OctoLocalPlanner::lookupRobotPose2D(RobotPose2D & robot_pose)

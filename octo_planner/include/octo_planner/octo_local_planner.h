@@ -22,6 +22,7 @@
 #include "octo_planner/octo_elastic_band.h"
 #include "octo_planner/octo_local_visualizer.h"
 #include "octo_planner/d1_velocity_smoother.h"
+#include "octo_planner/d1_control_types.h"
 #include "octo_planner/gradient_footprint_model.h"
 #include "octo_planner/forbidden_zone_field.h"
 #include "octo_planner/octo_teb_optimal_planner.h"
@@ -42,9 +43,6 @@ public:
   virtual bool isGoalReached() override;
 
 private:
-  struct RobotPose2D { double x, y, z, yaw; };
-  struct TrackingTarget { double base_x, base_y; };
-
   // Local Octomap callback
   void onOctomap(const octomap_msgs::Octomap::ConstPtr & msg);
 
