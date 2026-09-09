@@ -43,9 +43,14 @@ OctomapROIMergerNode::OctomapROIMergerNode(ros::NodeHandle & nh, ros::NodeHandle
   pnh_(pnh),
   tf_listener_(tf_buffer_),
   has_odom_pose_(false),
+  has_merged_before_(false),
   robot_x_(0.0),
   robot_y_(0.0),
-  robot_z_(0.0)
+  robot_z_(0.0),
+  last_merged_x_(0.0),
+  last_merged_y_(0.0),
+  last_merged_z_(0.0),
+  last_update_time_(0)
 {
   pnh_.param<std::string>("global_octomap_topic", global_octomap_topic_, "/octomap_global");
   pnh_.param<std::string>("local_octomap_topic", local_octomap_topic_, "/octomap_local");
@@ -55,6 +60,8 @@ OctomapROIMergerNode::OctomapROIMergerNode(ros::NodeHandle & nh, ros::NodeHandle
   pnh_.param<double>("crop_radius_xy", crop_radius_xy_, 3.0);
   pnh_.param<double>("crop_height_above", crop_height_above_, 2.0);
   pnh_.param<double>("crop_height_below", crop_height_below_, 1.0);
+  pnh_.param<double>("update_dist_threshold", update_dist_threshold_, 0.15);
+  pnh_.param<double>("max_update_rate", max_update_rate_, 10.0);
 
   odom_sub_ = nh_.subscribe(odom_topic_, 1, &OctomapROIMergerNode::onOdom, this);
   global_octomap_sub_ = nh_.subscribe(global_octomap_topic_, 1, &OctomapROIMergerNode::onGlobalOctomap, this);
@@ -70,12 +77,37 @@ OctomapROIMergerNode::OctomapROIMergerNode(ros::NodeHandle & nh, ros::NodeHandle
 
 void OctomapROIMergerNode::onOdom(const nav_msgs::Odometry::ConstPtr & msg)
 {
-  std::lock_guard<std::mutex> lock(pose_mutex_);
-  robot_x_ = msg->pose.pose.position.x;
-  robot_y_ = msg->pose.pose.position.y;
-  robot_z_ = msg->pose.pose.position.z;
-  odom_frame_ = msg->header.frame_id.empty() ? target_frame_ : msg->header.frame_id;
-  has_odom_pose_ = true;
+  const double cur_x = msg->pose.pose.position.x;
+  const double cur_y = msg->pose.pose.position.y;
+  const double cur_z = msg->pose.pose.position.z;
+  const ros::Time now = ros::Time::now();
+
+  bool should_update = false;
+  {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    robot_x_ = cur_x;
+    robot_y_ = cur_y;
+    robot_z_ = cur_z;
+    odom_frame_ = msg->header.frame_id.empty() ? target_frame_ : msg->header.frame_id;
+    has_odom_pose_ = true;
+
+    double d = std::hypot(cur_x - last_merged_x_, cur_y - last_merged_y_);
+    double min_interval = (max_update_rate_ > 0.0) ? (1.0 / max_update_rate_) : 0.1;
+    if (!has_merged_before_ || (d >= update_dist_threshold_ && (now - last_update_time_).toSec() >= min_interval))
+    {
+      last_merged_x_ = cur_x;
+      last_merged_y_ = cur_y;
+      last_merged_z_ = cur_z;
+      last_update_time_ = now;
+      has_merged_before_ = true;
+      should_update = true;
+    }
+  }
+
+  if (should_update)
+  {
+    processAndPublishFusedMap();
+  }
 }
 
 bool OctomapROIMergerNode::getLatestRobotPose(double & rx, double & ry, double & rz)
@@ -132,10 +164,6 @@ void OctomapROIMergerNode::onLocalOctomap(const octomap_msgs::Octomap::ConstPtr 
 
 void OctomapROIMergerNode::processAndPublishFusedMap()
 {
-  if (fused_octomap_pub_.getNumSubscribers() == 0) {
-    return;
-  }
-
   octomap_msgs::Octomap::ConstPtr global_msg, local_msg;
   {
     std::lock_guard<std::mutex> lock(map_mutex_);

@@ -264,6 +264,10 @@ bool OctoLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& pl
 
   global_plan_ = plan;
   prev_optimized_local_plan_.clear();
+  // A new plan starts at the robot's current position, so the inherited index
+  // from the previous plan points into an unrelated region of the new plan.
+  // Reset the seed so the projection search starts from the plan head.
+  target_index_ = 0;
   target_index_ = findInitialTargetIndex3D();
   pose_adjusting_ = false;
   goal_reached_ = false;

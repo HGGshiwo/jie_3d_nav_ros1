@@ -16,6 +16,19 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
   RobotPose2D robot_pose;
   if (!lookupRobotPose2D(robot_pose)) return target_index_;
 
+  // The global plan z comes from ground-support cells (terrain frame), while
+  // robot_pose.z is base_link (~0.3m above ground). On stair descents the plan
+  // z drops along the path, so projecting with base z biases the anchor toward
+  // higher-z (behind) segments and the tracking point ends up behind the robot.
+  // Match against the terrain height under the robot instead; fall back to the
+  // raw base z until the local terrain field has been built.
+  double ref_z = robot_pose.z;
+  double ground_z = 0.0;
+  if (forbidden_field_.getTerrainHeight(robot_pose.x, robot_pose.y, ground_z))
+  {
+    ref_z = ground_z;
+  }
+
   const std::size_t plan_size = global_plan_.size();
   if (plan_size <= 1)
   {
@@ -29,8 +42,11 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
     best_seg_idx = 0;
   }
 
-  // Tight search window around previous target_index_ to guarantee forward progression
-  const int search_start = std::max(0, best_seg_idx - 2);
+  // Forward-only search window: the anchor must never slide backward along the
+  // plan. On stair descents, projection noise made the anchor retreat the full
+  // allowed margin (-2 segments) every control cycle, which dropped the
+  // tracking point behind the robot.
+  const int search_start = std::max(0, best_seg_idx);
   const int search_end = std::min(static_cast<int>(plan_size) - 1, best_seg_idx + 40);
 
   double min_proj_sq_dist = std::numeric_limits<double>::max();
@@ -45,15 +61,15 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
     double t = 0.0;
     if (seg_sq_len > 1.0e-6)
     {
-      t = ((robot_pose.x - p1.x) * dx + (robot_pose.y - p1.y) * dy + (robot_pose.z - p1.z) * dz) / seg_sq_len;
+      t = ((robot_pose.x - p1.x) * dx + (robot_pose.y - p1.y) * dy + (ref_z - p1.z) * dz) / seg_sq_len;
       t = std::max(0.0, std::min(1.0, t));
     }
     const double px = p1.x + t * dx;
     const double py = p1.y + t * dy;
     const double pz = p1.z + t * dz;
     const double sq_dist = (robot_pose.x - px) * (robot_pose.x - px) +
-                          (robot_pose.y - py) * (robot_pose.y - py) +
-                          (robot_pose.z - pz) * (robot_pose.z - pz);
+                           (robot_pose.y - py) * (robot_pose.y - py) +
+                           (ref_z - pz) * (ref_z - pz);
 
     if (sq_dist < min_proj_sq_dist)
     {
@@ -291,7 +307,7 @@ void OctoLocalPlanner::onOctomap(const octomap_msgs::Octomap::ConstPtr & msg)
 void OctoLocalPlanner::processOctomapAsync(const octomap_msgs::Octomap::ConstPtr & msg)
 {
   std::shared_ptr<octomap::OcTree> octree(dynamic_cast<octomap::OcTree *>(octomap_msgs::msgToMap(*msg)));
-  if (octree)
+  if (octree && octree->size() > 0)
   {
     bg_planner_.setOctree(octree);
     bg_planner_.rebuildPreblockedCells();
@@ -308,7 +324,14 @@ void OctoLocalPlanner::processOctomapAsync(const octomap_msgs::Octomap::ConstPtr
   }
   else
   {
-    ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: OcTree conversion failed.");
+    if (!octree)
+    {
+      ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: OcTree conversion failed.");
+    }
+    else
+    {
+      ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: Received empty OcTree map (0 voxels), skipping update.");
+    }
   }
   worker_running_ = false;
 }

@@ -46,7 +46,10 @@ private:
 
   std::mutex pose_mutex_;
   bool has_odom_pose_;
+  bool has_merged_before_;
   double robot_x_, robot_y_, robot_z_;
+  double last_merged_x_, last_merged_y_, last_merged_z_;
+  ros::Time last_update_time_;
   std::string odom_frame_;
 
   std::mutex map_mutex_;
@@ -65,6 +68,8 @@ private:
   double crop_radius_xy_;
   double crop_height_above_;
   double crop_height_below_;
+  double update_dist_threshold_;
+  double max_update_rate_;
 };
 
 } // namespace octo_planner
