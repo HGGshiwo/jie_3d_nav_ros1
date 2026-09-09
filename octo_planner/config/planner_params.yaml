@@ -10,8 +10,8 @@ max_step_height_cells: 2
 robot_height_m: 0.60
 robot_clearance_height_cells: 3
 enable_preblocked_costmap: true
-preblocked_costmap_radius_cells: 3
-preblocked_costmap_weight: 1.5
+preblocked_costmap_radius_cells: 4
+preblocked_costmap_weight: 6.0
 heuristic_weight: 1.20
 lowest_traversable_only: false
 
@@ -34,12 +34,19 @@ local_planner_horizon: 2.20 # 局部 3D A* 避障拓扑探测与宏观绕行视�
 teb_planning_horizon: 1.00  # octo-teb 眼前近身微观轨迹平滑与避障视距 (m)
 local_max_iterations: 8000  # 局部 3D A* 避障搜索最大迭代步数 (保障大障碍物宏观绕行深度，约 50ms)
 
+# TEB Forbidden Zone repulsion parameters (增强局部轨迹的禁行区排斥力场)
+use_teb_optimizer: true
+weight_forbidden_zone: 20.0
+forbidden_zone_resolution: 0.10
+exterior_gradient_alpha: 3.0
+exterior_cost_base: 2.0
+
 # 3D Elastic Band parameters (OctoLocalPlanner only)
 eb_iterations: 25
 eb_w_smooth: 0.3
-eb_w_obstacle: 0.6
+eb_w_obstacle: 1.2
 eb_w_ground: 0.4
-eb_safe_distance: 0.55
+eb_safe_distance: 0.60
 eb_learning_rate: 0.1
 
 # Path tracking geometry

@@ -187,6 +187,8 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   private_nh.param<double>("forbidden_zone_resolution", forbidden_zone_resolution, 0.10);
   ForbiddenZoneParams fz_params;
   fz_params.resolution = forbidden_zone_resolution;
+  private_nh.param<double>("exterior_gradient_alpha", fz_params.exterior_gradient_alpha, 3.0);
+  private_nh.param<double>("exterior_cost_base", fz_params.exterior_cost_base, 2.0);
   forbidden_field_.setParams(fz_params);
 
   private_nh.param<double>("footprint_front_offset", footprint_front_offset_, 0.25);

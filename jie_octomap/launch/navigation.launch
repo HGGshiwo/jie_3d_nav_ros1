@@ -16,9 +16,9 @@
     <arg name="sim_init_z" default="0.0" />
     <arg name="sim_init_yaw" default="0.0" />
     <!-- 仿真运动噪声标准差 (线速度 m/s, 角速度 rad/s) -->
-    <arg name="sim_noise_linear" default="0.5" />
-    <arg name="sim_noise_lateral" default="0.5" />
-    <arg name="sim_noise_angular" default="0.5" />
+    <arg name="sim_noise_linear" default="0.1" />
+    <arg name="sim_noise_lateral" default="0.1" />
+    <arg name="sim_noise_angular" default="0.1" />
 
     <!-- 1. 全局地图生成节点 (按参数条件分发) -->
     <!-- Case A: 载入预构建的离线 Octomap 包 -->
