@@ -119,6 +119,12 @@ if (showRobotEl) {
         if (dogMeshGroup) dogMeshGroup.visible = e.target.checked;
     });
 }
+const showLocalAStarEl = document.getElementById('show-local-astar');
+if (showLocalAStarEl) {
+    showLocalAStarEl.addEventListener('change', (e) => {
+        if (localAStarPathLine) localAStarPathLine.visible = e.target.checked;
+    });
+}
 
 // ---- 3. 编辑交互逻辑 ----
 const raycaster = new THREE.Raycaster();
@@ -446,6 +452,7 @@ let startMesh = null;
 let goalMesh = null;
 let pathLine = null;
 let localPathLine = null;
+let localAStarPathLine = null;
 
 function updateStartVisual(x, y, z) {
     if (startMesh) scene.remove(startMesh);
@@ -490,6 +497,23 @@ function updateLocalPathVisual(points) {
     const material = new THREE.LineBasicMaterial({ color: 0xff007f, linewidth: 4 }); // 亮玫红色局部优化轨迹
     localPathLine = new THREE.Line(geometry, material);
     scene.add(localPathLine);
+}
+
+function updateLocalAStarPathVisual(points) {
+    if (localAStarPathLine) {
+        scene.remove(localAStarPathLine);
+        localAStarPathLine.geometry.dispose();
+        localAStarPathLine.material.dispose();
+        localAStarPathLine = null;
+    }
+    if (!points || points.length < 2) return;
+    if (document.getElementById('show-local-astar') && !document.getElementById('show-local-astar').checked) return;
+
+    const threePoints = points.map(pt => new THREE.Vector3(pt[0], pt[1], pt[2]));
+    const geometry = new THREE.BufferGeometry().setFromPoints(threePoints);
+    const material = new THREE.LineBasicMaterial({ color: 0xffaa00, linewidth: 3 }); // 金黄色 局部A*宏观避障路径
+    localAStarPathLine = new THREE.Line(geometry, material);
+    scene.add(localAStarPathLine);
 }
 
 async function setStartPoint(x, y, z) {
@@ -699,6 +723,9 @@ function initLiveWebSocket() {
             }
             if (data.local_path !== undefined) {
                 updateLocalPathVisual(data.local_path);
+            }
+            if (data.local_astar_path !== undefined) {
+                updateLocalAStarPathVisual(data.local_astar_path);
             }
 
             // 4. 动态图层增量渲染

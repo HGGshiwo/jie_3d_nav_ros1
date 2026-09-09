@@ -134,6 +134,9 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   private_nh.param<double>("tracking_debug_view_pixels_per_meter", vis_params.debug_ppm, 80.0);
   private_nh.param<double>("tracking_debug_view_frequency", vis_params.debug_view_frequency, 10.0);
   visualizer_.initialize(private_nh, vis_params);
+  private_nh.param<double>("local_planner_horizon", local_planner_horizon_, 2.20);
+  private_nh.param<double>("teb_planning_horizon",  teb_planning_horizon_,  1.00);
+
   // Subscribe to octomap
   std::string octomap_topic;
   private_nh.param<std::string>("octomap_topic", octomap_topic, "/octomap_local");
@@ -142,6 +145,7 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   status_pub_ = nh.advertise<std_msgs::String>("/move_base/status_text", 1, true);
   emergency_stop_pub_ = private_nh.advertise<visualization_msgs::MarkerArray>("emergency_stop_markers", 1, /*latch=*/true);
   local_plan_pub_ = nh.advertise<nav_msgs::Path>("/move_base/local_plan", 1);
+  local_astar_plan_pub_ = nh.advertise<nav_msgs::Path>("/move_base/local_astar_plan", 1);
   // TEB Optimizer & Footprint Parameters
   private_nh.param<bool>("use_teb_optimizer", use_teb_optimizer_, true);
   private_nh.param<double>("weight_forbidden_zone", weight_forbidden_zone_, 2.0);
@@ -199,6 +203,13 @@ void OctoLocalPlanner::resetPlanState()
     empty_path.header.frame_id = map_frame_;
     empty_path.header.stamp = ros::Time::now();
     local_plan_pub_.publish(empty_path);
+  }
+  if (local_astar_plan_pub_.getNumSubscribers() > 0)
+  {
+    nav_msgs::Path empty_path;
+    empty_path.header.frame_id = map_frame_;
+    empty_path.header.stamp = ros::Time::now();
+    local_astar_plan_pub_.publish(empty_path);
   }
 }
 
@@ -295,64 +306,19 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     return true;
   }
 
-  // Extract local band strictly forward starting from projected segment
-  int seg_idx = findInitialTargetIndex3D();
-  std::vector<geometry_msgs::PoseStamped> local_band;
-  geometry_msgs::PoseStamped cur_pose;
-  cur_pose.header.frame_id = map_frame_;
-  cur_pose.header.stamp = ros::Time::now();
-  cur_pose.pose.position.x = robot_pose.x;
-  cur_pose.pose.position.y = robot_pose.y;
-  cur_pose.pose.position.z = robot_pose.z;
-  tf2::Quaternion q; q.setRPY(0.0, 0.0, robot_pose.yaw);
-  cur_pose.pose.orientation = tf2::toMsg(q);
-  local_band.push_back(cur_pose);
+  // 1. Macro local band extraction along global plan up to local_planner_horizon_ (e.g. 2.2m)
+  std::vector<geometry_msgs::PoseStamped> local_astar_band = extractLocalBand(robot_pose, local_planner_horizon_);
 
-  double accumulated_dist = 0.0;
-  int idx = seg_idx + 1;
-  while (idx < static_cast<int>(global_plan_.size()) && accumulated_dist < 1.8 && local_band.size() < 15) {
-    local_band.push_back(global_plan_[idx]);
-    if (local_band.size() >= 2) {
-      const auto & p_prev = local_band[local_band.size() - 2].pose.position;
-      const auto & p_curr = local_band.back().pose.position;
-      accumulated_dist += std::hypot(p_curr.x - p_prev.x, p_curr.y - p_prev.y);
-    }
-    idx++;
-  }
-  if (local_band.size() == 1 && !global_plan_.empty()) {
-    local_band.push_back(global_plan_.back());
-  }
-
-  // Check if current local band segment is blocked by obstacles; if so, run 3D A* local re-planning
+  // 2. Local 3D A* obstacle detection & macro detour replanning
   auto t_pre_detour = LocalPlannerProfiler::Clock::now();
-  if (local_band.size() >= 2 && map_ready_) {
-    bool is_segment_blocked = false;
-    for (size_t i = 0; i + 1 < local_band.size(); ++i) {
-      const auto & p1 = local_band[i].pose.position;
-      const auto & p2 = local_band[i + 1].pose.position;
-      octomap::point3d pt1(static_cast<float>(p1.x), static_cast<float>(p1.y), static_cast<float>(p1.z));
-      octomap::point3d pt2(static_cast<float>(p2.x), static_cast<float>(p2.y), static_cast<float>(p2.z));
-      if (!planner_.isLineTraversable(pt1, pt2)) {
-        is_segment_blocked = true;
-        break;
-      }
-    }
-
-    if (is_segment_blocked) {
-      const auto & p_start = local_band.front().pose.position;
-      const auto & p_goal  = local_band.back().pose.position;
-      std::vector<GridIndex> path_cells;
-      std::string error_msg;
-      if (planner_.plan(p_start, p_goal, path_cells, error_msg)) {
-        auto replanned = planner_.generateSmoothPath(path_cells, local_band.front(), local_band.back(), true);
-        if (replanned.size() >= 2) {
-          local_band = replanned;
-          ROS_INFO_THROTTLE(1.0, "OctoLocalPlanner: Obstacle detected on local segment. Local 3D A* detour generated with %zu nodes.", local_band.size());
-        }
-      }
-    }
-  }
+  local_astar_band = checkAndReplanAStarDetour(local_astar_band);
   prof.detour_ms = LocalPlannerProfiler::elapsedMs(t_pre_detour);
+
+  // 3. Publish macro A* plan to /move_base/local_astar_plan for debugging & web UI visualization
+  publishLocalAStarPlan(local_astar_band);
+
+  // 4. Micro local band clipping for TEB optimization (e.g. 1.0m planning right in front)
+  std::vector<geometry_msgs::PoseStamped> local_band = clipTrajectoryByDistance(local_astar_band, teb_planning_horizon_);
 
   // Optimize local band
   if (local_band.size() >= 3 && map_ready_)

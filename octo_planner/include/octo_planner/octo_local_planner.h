@@ -56,6 +56,12 @@ private:
   bool transformToBase(const geometry_msgs::PoseStamped & pose_in, geometry_msgs::PoseStamped & pose_out);
   bool checkEmergencyStop(const RobotPose2D & robot_pose, geometry_msgs::Twist & cmd_vel);
   void resetPlanState();
+
+  // Hierarchical local trajectory helpers (implemented in octo_local_planner_path.cpp)
+  std::vector<geometry_msgs::PoseStamped> extractLocalBand(const RobotPose2D & robot_pose, double max_distance);
+  std::vector<geometry_msgs::PoseStamped> checkAndReplanAStarDetour(const std::vector<geometry_msgs::PoseStamped> & local_band);
+  std::vector<geometry_msgs::PoseStamped> clipTrajectoryByDistance(const std::vector<geometry_msgs::PoseStamped> & path, double max_distance);
+  void publishLocalAStarPlan(const std::vector<geometry_msgs::PoseStamped> & path);
   
   bool shouldApplyRobotCenterOffset(const std::string & frame) const { return frame == robot_center_offset_frame_; }
   void applyRobotCenterOffset(const std::string & frame, RobotPose2D & rp) const {
@@ -93,6 +99,7 @@ private:
   ros::Publisher status_pub_;
   ros::Publisher emergency_stop_pub_;
   ros::Publisher local_plan_pub_;
+  ros::Publisher local_astar_plan_pub_;
 
   // Planner Components
   OctoPlannerCore planner_;
@@ -109,6 +116,8 @@ private:
   std::string map_frame_;
   std::string robot_center_offset_frame_;
   double robot_center_offset_x_, robot_center_offset_y_, robot_center_offset_z_;
+  double local_planner_horizon_;
+  double teb_planning_horizon_;
   double lookahead_distance_, tracking_xy_tol_;
   double goal_pos_tol_, goal_yaw_tol_;
   double linear_gain_, lateral_gain_, heading_gain_, cross_track_angular_gain_, final_yaw_gain_;

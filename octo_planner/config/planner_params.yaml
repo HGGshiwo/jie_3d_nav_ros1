@@ -29,6 +29,10 @@ emergency_stop_min_occupied_voxels: 3
 robot_body_height: 0.26 # 机器狗躯干正中心相对 base_footprint 的高度偏置 (m)
 
 # ===== Local planner parameters (OctoLocalPlanner / D1LocalPlanner) =====
+# Hierarchical planning horizons (分层局部规划视距)
+local_planner_horizon: 2.20 # 局部 3D A* 避障拓扑探测与宏观绕行视距 (m)
+teb_planning_horizon: 1.00  # octo-teb 眼前近身微观轨迹平滑与避障视距 (m)
+
 # 3D Elastic Band parameters (OctoLocalPlanner only)
 eb_iterations: 25
 eb_w_smooth: 0.3

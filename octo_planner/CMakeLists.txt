@@ -123,6 +123,7 @@ add_dependencies(d1_local_planner_plugin ${${PROJECT_NAME}_EXPORTED_TARGETS} ${c
 # ---- octo_local_planner_plugin ----
 add_library(octo_local_planner_plugin
   src/octo_local_planner.cpp
+  src/octo_local_planner_path.cpp
   src/octo_local_planner_tracking.cpp
   src/forbidden_zone_field.cpp
   src/edge_forbidden_zone.cpp

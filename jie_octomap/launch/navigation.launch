@@ -16,9 +16,9 @@
     <arg name="sim_init_z" default="0.0" />
     <arg name="sim_init_yaw" default="0.0" />
     <!-- 仿真运动噪声标准差 (线速度 m/s, 角速度 rad/s) -->
-    <arg name="sim_noise_linear" default="0.008" />
-    <arg name="sim_noise_lateral" default="0.008" />
-    <arg name="sim_noise_angular" default="0.006" />
+    <arg name="sim_noise_linear" default="1.0" />
+    <arg name="sim_noise_lateral" default="1.0" />
+    <arg name="sim_noise_angular" default="1.0" />
 
     <!-- 1. 全局地图生成节点 (按参数条件分发) -->
     <!-- Case A: 载入预构建的离线 Octomap 包 -->
@@ -104,6 +104,8 @@
         <param name="preblocked_marker_topic" value="/move_base/preblocked_cells" />
         <param name="risk_cost_topic" value="/move_base/risk_cost_cloud" />
         <param name="path_topic" value="/move_base/plan" />
+        <param name="local_path_topic" value="/move_base/local_plan" />
+        <param name="local_astar_path_topic" value="/move_base/local_astar_plan" />
         <param name="odom_topic" value="/loc_base" />
         <param name="publish_fake_tf" value="$(arg sim)" />
         <param name="linear_noise_std" value="$(arg sim_noise_linear)" />

@@ -108,6 +108,8 @@ class RosBridge:
         self.path_version = 0
         self.latest_local_path: List[List[float]] = []
         self.local_path_version = 0
+        self.latest_local_astar_path: List[List[float]] = []
+        self.local_astar_path_version = 0
         self.latest_odom_pose = None
         self.latest_status_text = "就绪"
         self.status_version = 0
@@ -160,6 +162,7 @@ class RosBridge:
         emergency_stop_topic = rospy.get_param("~emergency_stop_topic", "/move_base/OctoLocalPlanner/emergency_stop_markers")
         path_topic = rospy.get_param("~path_topic", "/move_base/plan")
         local_path_topic = rospy.get_param("~local_path_topic", "/move_base/local_plan")
+        local_astar_path_topic = rospy.get_param("~local_astar_path_topic", "/move_base/local_astar_plan")
         odom_topic = rospy.get_param("~odom_topic", "/loc_base")
         cmd_vel_topic = rospy.get_param("~cmd_vel_topic", "/cmd_vel")
         status_text_topic = rospy.get_param("~status_text_topic", "/move_base/status_text")
@@ -191,6 +194,7 @@ class RosBridge:
         rospy.Subscriber(emergency_stop_topic, MarkerArray, self._emergency_stop_callback)
         rospy.Subscriber(path_topic, ROSPath, self._path_callback)
         rospy.Subscriber(local_path_topic, ROSPath, self._local_path_callback)
+        rospy.Subscriber(local_astar_path_topic, ROSPath, self._local_astar_path_callback)
         rospy.Subscriber(odom_topic, Odometry, self._odom_callback)
         rospy.Subscriber(cmd_vel_topic, Twist, self._cmd_vel_callback)
         rospy.Subscriber(status_text_topic, String, self._status_text_callback)
@@ -285,6 +289,10 @@ class RosBridge:
     def _local_path_callback(self, msg: ROSPath):
         self.latest_local_path = [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
         self.local_path_version += 1
+
+    def _local_astar_path_callback(self, msg: ROSPath):
+        self.latest_local_astar_path = [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
+        self.local_astar_path_version += 1
 
     def _update_layer(self, name: str, parsed_data: Dict[str, Any]):
         self.latest_ros_data[name] = parsed_data
@@ -544,7 +552,7 @@ class RosBridge:
 
         self.ros_pubs[layer_name].publish(marker)
 
-    def get_live_frame(self, requested_layers: Optional[List[str]], client_versions: Dict[str, int], client_path_v: int = -1, client_status_v: int = -1, client_local_path_v: int = -1) -> Dict[str, Any]:
+    def get_live_frame(self, requested_layers: Optional[List[str]], client_versions: Dict[str, int], client_path_v: int = -1, client_status_v: int = -1, client_local_path_v: int = -1, client_local_astar_path_v: int = -1) -> Dict[str, Any]:
         """为 WebSocket 构造聚合帧：整合位姿、路径、状态与增量图层"""
         has_pose, pos, ori = self.lookup_robot_pose()
         layers_data = self.get_layer_response(requested_layers, client_versions)
@@ -552,6 +560,7 @@ class RosBridge:
         # 仅在发生变化时才携带完整 path，避免每帧重复发送大数组
         path_data = self.latest_planned_path if (client_path_v < 0 or client_path_v != self.path_version) else None
         local_path_data = self.latest_local_path if (client_local_path_v < 0 or client_local_path_v != self.local_path_version) else None
+        local_astar_path_data = self.latest_local_astar_path if (client_local_astar_path_v < 0 or client_local_astar_path_v != self.local_astar_path_version) else None
         status_data = self.latest_status_text if (client_status_v < 0 or client_status_v != self.status_version) else None
 
         return {
@@ -562,6 +571,8 @@ class RosBridge:
             "path_version": self.path_version,
             "local_path": local_path_data,
             "local_path_version": self.local_path_version,
+            "local_astar_path": local_astar_path_data,
+            "local_astar_path_version": self.local_astar_path_version,
             "layers": layers_data
         }
 
