@@ -32,6 +32,7 @@ robot_body_height: 0.26 # 机器狗躯干正中心相对 base_footprint 的高�
 # Hierarchical planning horizons (分层局部规划视距)
 local_planner_horizon: 2.20 # 局部 3D A* 避障拓扑探测与宏观绕行视距 (m)
 teb_planning_horizon: 1.00  # octo-teb 眼前近身微观轨迹平滑与避障视距 (m)
+local_max_iterations: 8000  # 局部 3D A* 避障搜索最大迭代步数 (保障大障碍物宏观绕行深度，约 50ms)
 
 # 3D Elastic Band parameters (OctoLocalPlanner only)
 eb_iterations: 25
@@ -42,7 +43,7 @@ eb_safe_distance: 0.55
 eb_learning_rate: 0.1
 
 # Path tracking geometry
-lookahead_distance: 1.00
+lookahead_distance: 0.55
 robot_center_offset_frame: base_link
 robot_center_offset_x: 0.0
 robot_center_offset_y: 0.0
@@ -61,7 +62,7 @@ linear_gain: 1.5
 lateral_gain: 0.4
 heading_gain: 1.2
 cross_track_angular_gain: 0.5
-final_yaw_gain: 0.3
+final_yaw_gain: 1.0
 
 # Motion mode and limits
 enable_lateral_motion: true

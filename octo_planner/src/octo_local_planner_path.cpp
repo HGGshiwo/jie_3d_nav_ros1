@@ -3,6 +3,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 namespace octo_planner
 {
@@ -52,10 +53,27 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
 {
   if (local_band.size() < 2 || !map_ready_)
   {
+    if (!map_ready_)
+    {
+      ROS_WARN_THROTTLE(2.0, "OctoLocalPlanner: checkAndReplanAStarDetour: OcTree map is not ready! Returning global band.");
+    }
     return local_band;
   }
 
-  bool is_segment_blocked = false;
+  const auto & p_start = local_band.front().pose.position;
+  geometry_msgs::Point p_goal = local_band.back().pose.position;
+  geometry_msgs::PoseStamped goal_pose_stamped = local_band.back();
+
+  // 1. Calculate lateral cross-track distance from robot to nearest point on global plan
+  double d_lateral = 0.0;
+  if (!global_plan_.empty() && target_index_ >= 0 && target_index_ < static_cast<int>(global_plan_.size()))
+  {
+    const auto & p_global = global_plan_[target_index_].pose.position;
+    d_lateral = std::hypot(p_start.x - p_global.x, p_start.y - p_global.y);
+  }
+
+  // 2. Check if the default corridor trajectory has any obstacle collision
+  bool is_corridor_blocked = false;
   for (size_t i = 0; i + 1 < local_band.size(); ++i)
   {
     const auto & p1 = local_band[i].pose.position;
@@ -64,30 +82,128 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
     octomap::point3d pt2(static_cast<float>(p2.x), static_cast<float>(p2.y), static_cast<float>(p2.z));
     if (!planner_.isLineTraversable(pt1, pt2))
     {
-      is_segment_blocked = true;
+      is_corridor_blocked = true;
       break;
     }
   }
 
-  if (is_segment_blocked)
+  // 3. Continuous Guidance:
+  // If the path ahead is clear AND the robot is already closely tracking the global path,
+  // we follow the global corridor with zero overhead.
+  if (!is_corridor_blocked && d_lateral < 0.15)
   {
-    const auto & p_start = local_band.front().pose.position;
-    const auto & p_goal  = local_band.back().pose.position;
-    std::vector<GridIndex> path_cells;
-    std::string error_msg;
-    if (planner_.plan(p_start, p_goal, path_cells, error_msg))
+    last_valid_detour_.clear();
+    return local_band;
+  }
+
+  // 4. Anchor Point Adaptation for Detour Planning:
+  // If the nominal forward anchor is itself occupied or lacking traversable ground support,
+  // adaptively search forward along the global path to find the re-emergence point beyond the obstacle.
+  octomap::point3d goal_pt(static_cast<float>(p_goal.x), static_cast<float>(p_goal.y), static_cast<float>(p_goal.z));
+  if (!planner_.isLineTraversable(goal_pt, goal_pt))
+  {
+    bool found_clean_anchor = false;
+    int cur_idx = (target_index_ >= 0 && target_index_ < static_cast<int>(global_plan_.size())) ? target_index_ : 0;
+    int nominal_idx = cur_idx;
+    for (int i = cur_idx; i < static_cast<int>(global_plan_.size()); ++i)
     {
-      auto replanned = planner_.generateSmoothPath(path_cells, local_band.front(), local_band.back(), true);
-      if (replanned.size() >= 2)
+      const auto & gp = global_plan_[i].pose.position;
+      if (std::hypot(gp.x - p_goal.x, gp.y - p_goal.y) < 0.10)
       {
-        ROS_INFO_THROTTLE(1.0, "OctoLocalPlanner: Obstacle detected on local segment. Local 3D A* detour generated with %zu nodes (horizon=%.2fm).",
-                          replanned.size(), local_planner_horizon_);
-        return replanned;
+        nominal_idx = i;
+        break;
+      }
+    }
+
+    // A. Forward search along global plan (up to ~1.75m / 35 poses further) to emerge past the obstacle
+    const int max_fwd_idx = std::min(static_cast<int>(global_plan_.size()) - 1, nominal_idx + 35);
+    for (int i = nominal_idx + 1; i <= max_fwd_idx; ++i)
+    {
+      const auto & cand = global_plan_[i].pose.position;
+      octomap::point3d cand_pt(static_cast<float>(cand.x), static_cast<float>(cand.y), static_cast<float>(cand.z));
+      if (planner_.isLineTraversable(cand_pt, cand_pt))
+      {
+        p_goal = cand;
+        goal_pose_stamped = global_plan_[i];
+        found_clean_anchor = true;
+        break;
+      }
+    }
+
+    // B. Backward fallback: If obstacle extends too far, pick the furthest traversable pose in front
+    if (!found_clean_anchor)
+    {
+      for (int i = static_cast<int>(local_band.size()) - 2; i >= 1; --i)
+      {
+        const auto & cand = local_band[i].pose.position;
+        octomap::point3d cand_pt(static_cast<float>(cand.x), static_cast<float>(cand.y), static_cast<float>(cand.z));
+        if (planner_.isLineTraversable(cand_pt, cand_pt))
+        {
+          p_goal = cand;
+          goal_pose_stamped = local_band[i];
+          found_clean_anchor = true;
+          break;
+        }
       }
     }
   }
 
-  return local_band;
+  // 5. If an obstacle blocks the corridor OR the robot is laterally offset (e.g. detouring beside an obstacle),
+  // continuously plan with 3D A* from current robot pose directly to the forward anchor point on the global path!
+  std::vector<GridIndex> path_cells;
+  std::string error_msg;
+  if (planner_.plan(p_start, p_goal, path_cells, error_msg))
+  {
+    auto replanned = planner_.generateSmoothPath(path_cells, local_band.front(), goal_pose_stamped, true);
+    if (replanned.size() >= 2)
+    {
+      last_valid_detour_ = replanned;
+      ROS_INFO_THROTTLE(1.0, "OctoLocalPlanner: Continuous 3D A* path generated: %zu nodes (d_lat=%.2fm, horizon=%.2fm).",
+                        replanned.size(), d_lateral, local_planner_horizon_);
+      return replanned;
+    }
+    error_msg = "generateSmoothPath returned < 2 points";
+  }
+
+  // 5. Fail-safe continuity: If 3D A* fails temporarily (e.g. single-frame sensor shadow),
+  // seamlessly roll along the previous valid detour path instead of snapping into obstacles.
+  if (!last_valid_detour_.empty())
+  {
+    size_t best_idx = 0;
+    double min_sq_dist = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < last_valid_detour_.size(); ++i)
+    {
+      const auto & p = last_valid_detour_[i].pose.position;
+      double d2 = (p.x - p_start.x) * (p.x - p_start.x) + (p.y - p_start.y) * (p.y - p_start.y);
+      if (d2 < min_sq_dist)
+      {
+        min_sq_dist = d2;
+        best_idx = i;
+      }
+    }
+
+    std::vector<geometry_msgs::PoseStamped> rolled_detour;
+    rolled_detour.push_back(local_band.front());
+    for (size_t i = best_idx + 1; i < last_valid_detour_.size(); ++i)
+    {
+      rolled_detour.push_back(last_valid_detour_[i]);
+    }
+
+    if (rolled_detour.size() >= 2)
+    {
+      ROS_WARN_THROTTLE(1.0, "OctoLocalPlanner: A* plan returned false (%s), rolling along last valid detour (%zu poses left).",
+                        error_msg.c_str(), rolled_detour.size());
+      last_valid_detour_ = rolled_detour;
+      return rolled_detour;
+    }
+  }
+
+  ROS_WARN_THROTTLE(1.0,
+    "OctoLocalPlanner: 3D A* detour failed [%s] (blocked=%d, d_lat=%.2fm)! Halting and returning empty to prevent collision.",
+    error_msg.c_str(), is_corridor_blocked ? 1 : 0, d_lateral);
+
+  last_valid_detour_.clear();
+  return {};
 }
 
 std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::clipTrajectoryByDistance(const std::vector<geometry_msgs::PoseStamped> & path, double max_distance)

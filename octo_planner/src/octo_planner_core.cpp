@@ -312,6 +312,15 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
             }
           }
         }
+
+  // Progressive relaxation: if full robot_radius cannot find any cell in local window,
+  // gracefully relax radius to find a traversable escape cell (e.g. when robot is adjacent to obstacle)
+  if (robot_radius > 0.08) {
+    if (findNearestFreeCell(seed, robot_radius * 0.5, radius_cells, require_ground_support, strict, xy_r, depth, out)) {
+      return true;
+    }
+  }
+
   return false;
 }
 

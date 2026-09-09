@@ -115,11 +115,12 @@ void PointCloudROICropNode::onPointCloud(const sensor_msgs::PointCloud2::ConstPt
   valid_y.reserve(msg->width * msg->height / 4);
   valid_z.reserve(msg->width * msg->height / 4);
 
-  // Forward-shifted ROI bounds: -1.0m behind to +4.5m in front of robot
-  const double min_x = sensor_rx - 1.0;
-  const double max_x = sensor_rx + (crop_radius_xy_ + 1.5);
-  const double min_y = sensor_ry - crop_radius_xy_;
-  const double max_y = sensor_ry + crop_radius_xy_;
+  // Symmetric omnidirectional ROI bounds (360-degree coverage around robot)
+  const double roi_xy = crop_radius_xy_ + 0.5;
+  const double min_x = sensor_rx - roi_xy;
+  const double max_x = sensor_rx + roi_xy;
+  const double min_y = sensor_ry - roi_xy;
+  const double max_y = sensor_ry + roi_xy;
   const double min_z = sensor_rz - crop_height_below_;
   const double max_z = sensor_rz + crop_height_above_;
 

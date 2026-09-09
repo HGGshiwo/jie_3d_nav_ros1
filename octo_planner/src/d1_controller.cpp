@@ -245,7 +245,8 @@ private:
     }
 
     // 1. Decoupled Pure Pursuit: smooth heading error calculation
-    const double heading_error = std::atan2(target.base_y, std::max(0.05, target.base_x));
+    const double heading_error = std::atan2(target.base_y, target.base_x);
+    const double abs_heading   = std::abs(heading_error);
 
     // 2. Smooth cruise forward velocity (cruise speed + cornering adapt + goal ramp down)
     RobotPose2D robot_pose;
@@ -256,11 +257,16 @@ private:
     }
 
     const double cruise_speed = velocity_smoother_.getParams().max_linear_speed;
-    const double corner_scale = std::max(0.3, std::cos(heading_error));
+    double corner_scale = 0.0;
+    if (abs_heading < 0.785) {
+      corner_scale = std::cos(heading_error);
+    } else if (abs_heading < 1.05) {
+      corner_scale = std::cos(heading_error) * (1.05 - abs_heading) / (1.05 - 0.785);
+    }
     const double goal_scale   = dist_to_goal < 0.6 ? std::max(0.0, dist_to_goal / 0.6) : 1.0;
 
     raw_cmd.linear.x  = cruise_speed * corner_scale * goal_scale;
-    raw_cmd.linear.y  = enable_lateral_motion_ ? target.base_y * lateral_gain_ : 0.0;
+    raw_cmd.linear.y  = (enable_lateral_motion_ && abs_heading < 0.785) ? target.base_y * lateral_gain_ : 0.0;
     raw_cmd.angular.z = heading_error * heading_gain_;
 
     const geometry_msgs::Twist cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);

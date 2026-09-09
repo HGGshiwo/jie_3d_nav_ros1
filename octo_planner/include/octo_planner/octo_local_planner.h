@@ -137,11 +137,13 @@ private:
   int max_step_height_cells_;
   int robot_clearance_height_cells_;
   int snap_search_radius_cells_;
+  int local_max_iterations_;
 
   // Planner state
   std::vector<geometry_msgs::PoseStamped> global_plan_;
   std::vector<geometry_msgs::PoseStamped> optimized_local_plan_;
   std::vector<geometry_msgs::PoseStamped> prev_optimized_local_plan_;
+  std::vector<geometry_msgs::PoseStamped> last_valid_detour_;
   int    target_index_;
   bool   pose_adjusting_;
   bool   goal_reached_;

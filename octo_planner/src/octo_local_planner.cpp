@@ -80,6 +80,29 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   double heuristic_weight = 1.20;
   private_nh.param<double>("heuristic_weight", heuristic_weight, 1.20);
 
+  bool enable_preblocked_costmap = true;
+  private_nh.param<bool>("enable_preblocked_costmap", enable_preblocked_costmap, true);
+  int preblocked_costmap_radius_cells = 3;
+  private_nh.param<int>("preblocked_costmap_radius_cells", preblocked_costmap_radius_cells, 3);
+  double preblocked_costmap_weight = 1.5;
+  private_nh.param<double>("preblocked_costmap_weight", preblocked_costmap_weight, 1.5);
+  bool lowest_traversable_only = false;
+  private_nh.param<bool>("lowest_traversable_only", lowest_traversable_only, false);
+  bool enable_path_shortcut = true;
+  private_nh.param<bool>("enable_path_shortcut", enable_path_shortcut, true);
+  bool enable_path_smoothing = true;
+  private_nh.param<bool>("enable_path_smoothing", enable_path_smoothing, true);
+  double path_interpolation_resolution = 0.05;
+  private_nh.param<double>("path_interpolation_resolution", path_interpolation_resolution, 0.05);
+  double corner_fillet_radius = 0.30;
+  private_nh.param<double>("corner_fillet_radius", corner_fillet_radius, 0.30);
+  bool enable_continuous_yaw = true;
+  private_nh.param<bool>("enable_continuous_yaw", enable_continuous_yaw, true);
+  int yaw_smoothing_window = 5;
+  private_nh.param<int>("yaw_smoothing_window", yaw_smoothing_window, 5);
+  local_max_iterations_ = 2000;
+  private_nh.param<int>("local_max_iterations", local_max_iterations_, 2000);
+
   auto configCore = [&](OctoPlannerCore& core) {
     core.setRobotRadius(robot_radius_);
     core.setRequireGroundSupport(require_ground_support_);
@@ -93,6 +116,17 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
     core.setHeuristicWeight(heuristic_weight);
     core.setRobotClearanceHeightCells(robot_clearance_height_cells_);
     core.setSnapSearchRadiusCells(snap_search_radius_cells_);
+    core.setEnablePreblockedCostmap(enable_preblocked_costmap);
+    core.setPreblockedCostmapRadiusCells(preblocked_costmap_radius_cells);
+    core.setPreblockedCostmapWeight(preblocked_costmap_weight);
+    core.setLowestTraversableOnly(lowest_traversable_only);
+    core.setEnablePathShortcut(enable_path_shortcut);
+    core.setEnablePathSmoothing(enable_path_smoothing);
+    core.setPathInterpolationResolution(path_interpolation_resolution);
+    core.setCornerFilletRadius(corner_fillet_radius);
+    core.setEnableContinuousYaw(enable_continuous_yaw);
+    core.setYawSmoothingWindow(yaw_smoothing_window);
+    core.setMaxIterations(local_max_iterations_);
   };
   configCore(planner_);
   configCore(bg_planner_);
@@ -193,6 +227,7 @@ void OctoLocalPlanner::resetPlanState()
   global_plan_.clear();
   optimized_local_plan_.clear();
   prev_optimized_local_plan_.clear();
+  last_valid_detour_.clear();
   target_index_ = 0;
   pose_adjusting_ = false;
   goal_reached_ = true;
@@ -272,6 +307,15 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   }
   last_control_time_ = now;
 
+  // Early goal proximity check
+  const auto & goal_pos = global_plan_.back().pose.position;
+  const double dist_to_goal = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
+  if (!pose_adjusting_ && (dist_to_goal < goal_pos_tol_ || 
+      (dist_to_goal < tracking_xy_tol_ && target_index_ >= static_cast<int>(global_plan_.size()) - 3)))
+  {
+    pose_adjusting_ = true;
+  }
+
   // Final goal adjustment
   if (pose_adjusting_)
   {
@@ -309,6 +353,39 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   // 1. Macro local band extraction along global plan up to local_planner_horizon_ (e.g. 2.2m)
   std::vector<geometry_msgs::PoseStamped> local_astar_band = extractLocalBand(robot_pose, local_planner_horizon_);
 
+  // Large heading deviation check: If robot is facing away from path (> 60 deg / 1.05 rad),
+  // front perception sensors cannot observe the path yet. Prioritize rotating in place to bring
+  // the path into forward sensor view before invoking 3D A* into the blind rear zone!
+  if (local_astar_band.size() >= 2)
+  {
+    size_t look_idx = 1;
+    for (size_t i = 1; i < local_astar_band.size(); ++i)
+    {
+      look_idx = i;
+      double dx = local_astar_band[i].pose.position.x - robot_pose.x;
+      double dy = local_astar_band[i].pose.position.y - robot_pose.y;
+      if (std::hypot(dx, dy) >= 0.40) break;
+    }
+    geometry_msgs::PoseStamped look_base;
+    if (transformToBase(local_astar_band[look_idx], look_base))
+    {
+      double heading_to_path = std::atan2(look_base.pose.position.y, look_base.pose.position.x);
+      if (std::abs(heading_to_path) > 1.05)
+      {
+        publishLocalAStarPlan(local_astar_band);
+        geometry_msgs::Twist raw_cmd;
+        raw_cmd.linear.x = 0.0;
+        raw_cmd.linear.y = 0.0;
+        raw_cmd.angular.z = heading_to_path * heading_gain_;
+        cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
+        last_cmd_vel_ = cmd_vel;
+        ROS_INFO_THROTTLE(1.0, "[OctoLocalPlanner] Facing away from path (yaw_err=%.1f deg). Aligning in place before 3D A*.",
+                          heading_to_path * 180.0 / M_PI);
+        return true;
+      }
+    }
+  }
+
   // 2. Local 3D A* obstacle detection & macro detour replanning
   auto t_pre_detour = LocalPlannerProfiler::Clock::now();
   local_astar_band = checkAndReplanAStarDetour(local_astar_band);
@@ -316,6 +393,22 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
   // 3. Publish macro A* plan to /move_base/local_astar_plan for debugging & web UI visualization
   publishLocalAStarPlan(local_astar_band);
+
+  if (local_astar_band.size() < 2)
+  {
+    velocity_smoother_.reset();
+    cmd_vel = geometry_msgs::Twist();
+    last_cmd_vel_ = cmd_vel;
+    if (local_plan_pub_.getNumSubscribers() > 0)
+    {
+      nav_msgs::Path empty_path;
+      empty_path.header.frame_id = map_frame_;
+      empty_path.header.stamp = ros::Time::now();
+      local_plan_pub_.publish(empty_path);
+    }
+    ROS_WARN_THROTTLE(1.0, "[OctoLocalPlanner] 3D A* detour failed! Halting robot to avoid obstacle collision.");
+    return false;
+  }
 
   // 4. Micro local band clipping for TEB optimization (e.g. 1.0m planning right in front)
   std::vector<geometry_msgs::PoseStamped> local_band = clipTrajectoryByDistance(local_astar_band, teb_planning_horizon_);
@@ -418,9 +511,8 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   }
 
   // Check goal proximity & final tracking point
-  const auto & goal_pos = global_plan_.back().pose.position;
-  const double dist_to_goal = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
-  if (target_index_ >= static_cast<int>(global_plan_.size()) - 3 && dist_to_goal < tracking_xy_tol_) {
+  if (dist_to_goal < goal_pos_tol_ || 
+      (dist_to_goal < tracking_xy_tol_ && target_index_ >= static_cast<int>(global_plan_.size()) - 3)) {
     pose_adjusting_ = true;
     cmd_vel = geometry_msgs::Twist();
     return true;
@@ -444,25 +536,29 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   target.base_x = target_pose_base.pose.position.x;
   target.base_y = target_pose_base.pose.position.y;
 
-  // Forward safety filter: if target in base frame is behind the robot, search forward along optimized band
-  while (target.base_x < 0.02 && tracking_idx + 1 < static_cast<int>(optimized_local_plan_.size())) {
-    tracking_idx++;
-    if (!transformToBase(optimized_local_plan_[tracking_idx], target_pose_base)) break;
-    target.base_x = target_pose_base.pose.position.x;
-    target.base_y = target_pose_base.pose.position.y;
+  // Control command calculation with acceleration smoothing via D1VelocitySmoother
+  // Pure Pursuit: true heading error calculation
+  const double heading_error = std::atan2(target.base_y, target.base_x);
+  const double abs_heading   = std::abs(heading_error);
+  const double cruise_speed  = velocity_smoother_.getParams().max_linear_speed;
+
+  // In-place rotation threshold:
+  // When heading error is large (> 45 deg / 0.785 rad), smoothly scale down forward speed.
+  // Beyond 60 deg (1.05 rad), stop forward speed completely to rotate in place towards the target,
+  // eliminating persistent orbital/spinning circles ("dog chasing tail").
+  double corner_scale = 0.0;
+  if (abs_heading < 0.785) {
+    corner_scale = std::cos(heading_error);
+  } else if (abs_heading < 1.05) {
+    corner_scale = std::cos(heading_error) * (1.05 - abs_heading) / (1.05 - 0.785);
   }
 
-  // Control command calculation with acceleration smoothing via D1VelocitySmoother
-  // Decoupled Pure Pursuit: smooth heading error & cruise speed calculation
-  const double heading_error = std::atan2(target.base_y, std::max(0.05, target.base_x));
-  const double cruise_speed  = velocity_smoother_.getParams().max_linear_speed;
-  const double corner_scale  = std::max(0.25, std::cos(heading_error));
   const double goal_scale    = dist_to_goal < 0.6 ? std::max(0.1, dist_to_goal / 0.6) : 1.0;
 
   geometry_msgs::Twist raw_cmd;
   raw_cmd.linear.x  = cruise_speed * corner_scale * goal_scale;
-  raw_cmd.linear.y  = enable_lateral_motion_ ? target.base_y * lateral_gain_ : 0.0;
-  raw_cmd.angular.z = heading_error * heading_gain_ + target.base_y * cross_track_angular_gain_;
+  raw_cmd.linear.y  = (enable_lateral_motion_ && abs_heading < 0.785) ? target.base_y * lateral_gain_ : 0.0;
+  raw_cmd.angular.z = heading_error * heading_gain_ + (abs_heading < 0.785 ? target.base_y * cross_track_angular_gain_ : 0.0);
 
   cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
   last_cmd_vel_ = cmd_vel;

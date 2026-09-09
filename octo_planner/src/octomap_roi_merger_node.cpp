@@ -193,11 +193,12 @@ void OctomapROIMergerNode::processAndPublishFusedMap()
     if (abs_global) {
       octomap::OcTree* global_octree = dynamic_cast<octomap::OcTree*>(abs_global);
       if (global_octree) {
-        // Compute ROI bounding box: -1.0m behind to +(crop_radius_xy_ + 1.5)m in front
-        const double min_x = rx - 1.0;
-        const double max_x = rx + (crop_radius_xy_ + 1.5);
-        const double min_y = ry - crop_radius_xy_;
-        const double max_y = ry + crop_radius_xy_;
+        // Symmetric omnidirectional ROI bounding box (360-degree coverage around robot)
+        const double roi_xy = crop_radius_xy_ + 0.5;
+        const double min_x = rx - roi_xy;
+        const double max_x = rx + roi_xy;
+        const double min_y = ry - roi_xy;
+        const double max_y = ry + roi_xy;
         const double min_z = rz - crop_height_below_;
         const double max_z = rz + crop_height_above_;
 

@@ -140,7 +140,37 @@ bool OctoLocalPlanner::isGoalReached()
   if (goal_reached_)
   {
     ROS_INFO_THROTTLE(1.0, "[OctoLocalPlanner] isGoalReached() is TRUE! Navigation complete.");
+    return true;
   }
+
+  // Robust verification: check if robot is already physically within goal tolerances
+  if (!global_plan_.empty())
+  {
+    RobotPose2D robot_pose;
+    if (lookupRobotPose2D(robot_pose))
+    {
+      const auto & goal_pos = global_plan_.back().pose.position;
+      const double dist_to_goal = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
+      double final_yaw_error = 0.0;
+      bool yaw_ok = true;
+      if (align_final_yaw_)
+      {
+        if (computeFinalYawErrorXY(global_plan_.back(), final_yaw_error))
+        {
+          yaw_ok = std::abs(final_yaw_error) < goal_yaw_tol_;
+        }
+      }
+      if (dist_to_goal < goal_pos_tol_ && yaw_ok)
+      {
+        resetPlanState();
+        velocity_smoother_.reset();
+        ROS_INFO("[OctoLocalPlanner] Goal reached directly verified! dist=%.3fm, yaw_err=%.3frad.",
+                 dist_to_goal, final_yaw_error);
+        return true;
+      }
+    }
+  }
+
   return goal_reached_;
 }
 
@@ -265,6 +295,7 @@ void OctoLocalPlanner::processOctomapAsync(const octomap_msgs::Octomap::ConstPtr
   {
     bg_planner_.setOctree(octree);
     bg_planner_.rebuildPreblockedCells();
+    bg_planner_.rebuildPreblockedCostmap();
 
     // Fast pointer/layer swap with main planner under lock (<0.01 ms)
     {

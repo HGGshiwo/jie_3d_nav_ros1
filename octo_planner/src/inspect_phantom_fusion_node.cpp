@@ -238,11 +238,12 @@ private:
     std::cout << "\n▶ Step 1 (Local 树克隆后):\n";
     printSubPoints("Step 1", fused_sim.get(), sub_pts);
 
-    // 写入 Global
-    const double min_x = p.x() - 1.0;
-    const double max_x = p.x() + (crop_radius_xy_ + 1.5);
-    const double min_y = p.y() - crop_radius_xy_;
-    const double max_y = p.y() + crop_radius_xy_;
+    // 写入 Global (对称全向 ROI 360 度覆盖)
+    const double roi_xy = crop_radius_xy_ + 0.5;
+    const double min_x = p.x() - roi_xy;
+    const double max_x = p.x() + roi_xy;
+    const double min_y = p.y() - roi_xy;
+    const double max_y = p.y() + roi_xy;
     const double min_z = p.z() - crop_height_below_;
     const double max_z = p.z() + crop_height_above_;
 
