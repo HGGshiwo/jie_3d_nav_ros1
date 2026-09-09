@@ -413,8 +413,8 @@ class RosBridge:
             q = euler_to_quaternion(0.0, 0.0, self.sim_yaw)
 
             # 1. 广播 TF 变换树: map -> odom -> base_footprint / base_link / odin1_base_link
-            child_frame = rospy.get_param("~tf_child_frame", "base_footprint")
-            candidates = list(dict.fromkeys([child_frame, "base_footprint", "base_link", "odin1_base_link"]))
+            child_frame = rospy.get_param("~tf_child_frame", "base_link")
+            candidates = list(dict.fromkeys([child_frame, "base_link", "base_footprint", "odin1_base_link"]))
 
             t_map_odom = TransformStamped()
             t_map_odom.header.stamp = now_stamp
@@ -515,7 +515,7 @@ class RosBridge:
         if self.tf_buffer is not None:
             try:
                 parent_frame = rospy.get_param("~tf_parent_frame", "map")
-                candidates = [rospy.get_param("~tf_child_frame", "base_footprint"), "base_link", "odin1_base_link"]
+                candidates = [rospy.get_param("~tf_child_frame", "base_link"), "base_link", "base_footprint", "odin1_base_link"]
                 for child in candidates:
                     try:
                         trans = self.tf_buffer.lookup_transform(parent_frame, child, rospy.Time(0), rospy.Duration(0.05))

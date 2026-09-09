@@ -23,7 +23,7 @@
         <param name="odom_topic" value="/loc_base" />
         <param name="publish_fake_tf" value="false" />
         <param name="tf_parent_frame" value="map" />
-        <param name="tf_child_frame" value="base_footprint" />
+        <param name="tf_child_frame" value="base_link" />
     </node>
 
     <!-- 3. 当传入 bag_file 时自动启动回放 -->
