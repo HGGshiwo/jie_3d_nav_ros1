@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from std_msgs.msg import String
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 try:
     from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 except ImportError:
@@ -76,7 +76,7 @@ class PcdMapImportNode:
 
         # Subscribers
         self.occupied_sub = rospy.Subscriber(
-            "/octomap_occupied_markers", Marker, self._on_occupied, queue_size=1)
+            "/octomap_occupied_markers", MarkerArray, self._on_occupied, queue_size=1)
         self.preblocked_sub = rospy.Subscriber(
             "/preblocked_cells_markers", Marker, self._on_preblocked, queue_size=1)
         self.traversable_sub = rospy.Subscriber(
@@ -123,9 +123,29 @@ class PcdMapImportNode:
         msg.pose.orientation.w = 1.0
         self.goal_pose_pub.publish(msg)
 
-    def _on_occupied(self, msg: Marker) -> None:
+    def _on_occupied(self, msg: MarkerArray) -> None:
         with self._lock:
-            self._store_marker("occupied", msg)
+            markers = msg.markers if hasattr(msg, "markers") else [msg]
+            all_pts = []
+            best_scale = None
+            for m in markers:
+                if m.type == Marker.CUBE_LIST and m.action == Marker.ADD and len(m.points) > 0:
+                    pts = [[p.x, p.y, p.z] for p in m.points]
+                    all_pts.extend(pts)
+                    sc = np.array([m.scale.x, m.scale.y, m.scale.z], dtype=np.float32)
+                    if best_scale is None or sc[0] < best_scale[0]:
+                        best_scale = sc
+            if not all_pts:
+                return
+            points = np.array(all_pts, dtype=np.float32)
+            scale = best_scale if best_scale is not None else np.array([0.05, 0.05, 0.05], dtype=np.float32)
+            point_digest = hashlib.blake2b(points.tobytes(), digest_size=8).digest()
+            signature = (points.shape, point_digest, float(scale[0]), float(scale[1]), float(scale[2]))
+            if self._layer_signatures.get("occupied") == signature:
+                return
+            self._layer_signatures["occupied"] = signature
+            self._latest_occupied = (points, scale)
+            self._layer_dirty = True
 
     def _on_preblocked(self, msg: Marker) -> None:
         with self._lock:

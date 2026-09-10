@@ -5,10 +5,10 @@
         <param name="pcd_file_cmd_topic" value="/pcd_file_cmd"/>
         <param name="octomap_topic" value="/octomap"/>
         <param name="frame_id" value="map"/>
-        <param name="resolution" value="0.05"/>
-        <param name="voxel_downsample_m" value="0.05"/>
-        <param name="min_points_per_voxel" value="1"/>
-        <param name="min_cluster_voxels" value="2"/>
+        <param name="resolution" value="0.1"/>
+        <param name="voxel_downsample_m" value="0"/>
+        <param name="min_points_per_voxel" value="2"/>
+        <param name="min_cluster_voxels" value="10"/>
     </node>
 
     <!-- planner_node (jie_path_node) -->

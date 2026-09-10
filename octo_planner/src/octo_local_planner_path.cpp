@@ -56,7 +56,7 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::extractLocalBand(const
     double dx = global_plan_[idx].pose.position.x - robot_pose.x;
     double dy = global_plan_[idx].pose.position.y - robot_pose.y;
     double fwd = dx * cos_yaw + dy * sin_yaw;
-    if (fwd < -0.05 && idx + 1 < static_cast<int>(global_plan_.size()))
+    if (fwd < 0.0 && idx + 1 < static_cast<int>(global_plan_.size()))
     {
       idx++;
       continue;
@@ -229,7 +229,7 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
         double dx = replanned[i].pose.position.x - rx;
         double dy = replanned[i].pose.position.y - ry;
         double fwd = dx * cos_y + dy * sin_y;
-        if (fwd < 0.0 && i + 1 < replanned.size())
+        if (fwd <= 0.01 && i + 1 < replanned.size())
         {
           continue;
         }
@@ -267,8 +267,17 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
 
     std::vector<geometry_msgs::PoseStamped> rolled_detour;
     rolled_detour.push_back(local_band.front());
+    const double cos_y = std::cos(robot_yaw);
+    const double sin_y = std::sin(robot_yaw);
     for (size_t i = best_idx + 1; i < last_valid_detour_.size(); ++i)
     {
+      double dx = last_valid_detour_[i].pose.position.x - p_start.x;
+      double dy = last_valid_detour_[i].pose.position.y - p_start.y;
+      double fwd = dx * cos_y + dy * sin_y;
+      if (fwd <= 0.01 && i + 1 < last_valid_detour_.size())
+      {
+        continue;
+      }
       rolled_detour.push_back(last_valid_detour_[i]);
     }
 

@@ -54,10 +54,11 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
 
   const bool is_descending = (goal_pt.z < start_pt.z - 0.05);
   const double fwd_yaw = !std::isnan(start_yaw) ? start_yaw : std::atan2(goal_pt.y - start_pt.y, goal_pt.x - start_pt.x);
+  const int eff_ground_depth = is_descending ? std::max(ground_support_depth_cells_, max_step_height_cells_) : ground_support_depth_cells_;
 
   if (!findNearestFreeCell(start, robot_radius_, snap_search_radius_cells_,
         require_ground_support_, strict_direct_ground_support_,
-        ground_support_xy_radius_cells_, ground_support_depth_cells_, valid_start,
+        ground_support_xy_radius_cells_, eff_ground_depth, valid_start,
         is_descending, fwd_yaw, true)) {
     error_msg = "Start cell is invalid/occupied and no free cell found nearby.";
     return false;
@@ -65,7 +66,7 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
 
   if (!findNearestFreeCell(goal, robot_radius_, snap_search_radius_cells_,
         require_ground_support_, strict_direct_ground_support_,
-        ground_support_xy_radius_cells_, ground_support_depth_cells_, valid_goal,
+        ground_support_xy_radius_cells_, eff_ground_depth, valid_goal,
         is_descending)) {
     error_msg = "Goal cell is invalid/occupied and no free cell found nearby.";
     return false;
@@ -95,6 +96,8 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
     {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
   };
   const int max_step = std::max(1, max_step_height_cells_);
+  const double cos_fwd = std::cos(fwd_yaw);
+  const double sin_fwd = std::sin(fwd_yaw);
 
   // 用于平局打破（Tie-breaking）的起终点基准向量
   const double dx_sg = static_cast<double>(valid_start.x - valid_goal.x);
@@ -122,6 +125,12 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
     for (int d = 0; d < 8; ++d) {
       const int dx = h_dirs[d][0];
       const int dy = h_dirs[d][1];
+
+      // Directional pruning: prevent A* from searching backwards behind valid_start (> 2 cells)
+      const double cand_start_dx = static_cast<double>(current.idx.x + dx - valid_start.x);
+      const double cand_start_dy = static_cast<double>(current.idx.y + dy - valid_start.y);
+      const double fwd_proj = cand_start_dx * cos_fwd + cand_start_dy * sin_fwd;
+      if (fwd_proj < -2.0) continue;
 
       GridIndex nbr;
       bool found_nbr = false;
@@ -156,7 +165,7 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
             if (closed_set.find(cand) != closed_set.end()) continue;
             if (isCellTraversable(cand, robot_radius_, require_ground_support_,
                                   strict_direct_ground_support_, ground_support_xy_radius_cells_,
-                                  ground_support_depth_cells_)) {
+                                  eff_ground_depth)) {
               nbr = cand;
               found_nbr = true;
               break;

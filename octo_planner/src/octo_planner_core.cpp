@@ -275,10 +275,8 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
     // A. Use cached traversability set if populated (for global planner compatibility)
     if (!traversable_cells_.empty())
     {
-      if (!only_forward || !has_heading) {
-        if (traversable_cells_.find(seed) != traversable_cells_.end()) {
-          out = seed; return true;
-        }
+      if (traversable_cells_.find(seed) != traversable_cells_.end()) {
+        out = seed; return true;
       }
       for (int r = 1; r <= radius_cells; ++r)
         for (int dz_mag = 0; dz_mag <= r; ++dz_mag)
@@ -303,11 +301,9 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
     }
 
     // B. Fallback to on-the-fly checks if traversability set is empty (local planner mode)
-    if (!only_forward || !has_heading) {
-      if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth))
-      {
-        out = seed; return true;
-      }
+    if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth))
+    {
+      out = seed; return true;
     }
     for (int r = 1; r <= radius_cells; ++r)
       for (int dz_mag = 0; dz_mag <= r; ++dz_mag)
@@ -344,6 +340,10 @@ bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_r
   if (enforce_forward && has_heading)
   {
     if (searchLoop(true)) return true;
+    if (prefer_downward) {
+      // When descending (downstairs/downslope), strictly forbid backward fallback onto higher steps
+      return false;
+    }
     return searchLoop(false);
   }
 
