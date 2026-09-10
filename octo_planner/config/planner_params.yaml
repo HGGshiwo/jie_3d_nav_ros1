@@ -6,7 +6,6 @@ strict_direct_ground_support: false
 ground_support_xy_radius_cells: 1
 ground_support_depth_cells: 3
 max_step_height_m: 0.30
-max_step_height_cells: 2
 robot_height_m: 0.60
 robot_clearance_height_cells: 3
 enable_preblocked_costmap: true
@@ -84,3 +83,4 @@ lateral_deadband: 0.01
 angular_deadband: 0.01
 goal_position_tolerance: 0.3
 goal_yaw_tolerance: 0.3
+goal_z_tolerance: 0.25

@@ -26,6 +26,7 @@ private:
   void onGlobalOctomap(const octomap_msgs::Octomap::ConstPtr & msg);
   void onLocalOctomap(const octomap_msgs::Octomap::ConstPtr & msg);
   void onOdom(const nav_msgs::Odometry::ConstPtr & msg);
+  void onTimer(const ros::TimerEvent & event);
   bool getLatestRobotPose(double & rx, double & ry, double & rz);
   void processAndPublishFusedMap();
   bool handleQueryCellDebugInfo(
@@ -40,19 +41,18 @@ private:
   ros::Subscriber odom_sub_;
   ros::Publisher fused_octomap_pub_;
   ros::ServiceServer query_cell_debug_srv_;
+  ros::Timer timer_;
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
   std::mutex pose_mutex_;
   bool has_odom_pose_;
-  bool has_merged_before_;
   double robot_x_, robot_y_, robot_z_;
-  double last_merged_x_, last_merged_y_, last_merged_z_;
-  ros::Time last_update_time_;
   std::string odom_frame_;
 
   std::mutex map_mutex_;
+  std::mutex merge_mutex_;
   octomap_msgs::Octomap::ConstPtr latest_global_msg_;
   octomap_msgs::Octomap::ConstPtr latest_local_msg_;
   std::shared_ptr<octomap::OcTree> latest_fused_tree_;
@@ -68,8 +68,7 @@ private:
   double crop_radius_xy_;
   double crop_height_above_;
   double crop_height_below_;
-  double update_dist_threshold_;
-  double max_update_rate_;
+  double publish_rate_;
 };
 
 } // namespace octo_planner

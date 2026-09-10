@@ -55,7 +55,7 @@ public:
     int max_iterations, snap_search_radius_cells;
     bool require_ground_support, strict_direct_ground_support;
     int ground_support_xy_radius_cells, ground_support_depth_cells;
-    int max_step_height_cells, robot_clearance_height_cells;
+    int robot_clearance_height_cells;
     bool enable_preblocked_costmap;
     int preblocked_costmap_radius_cells;
     double preblocked_costmap_weight;
@@ -74,7 +74,6 @@ public:
     double max_step_height_m;
     private_nh.param<double>("max_step_height_m", max_step_height_m, 0.30);
     private_nh.param<double>("max_step_height", max_step_height_m, max_step_height_m);
-    private_nh.param<int>("max_step_height_cells", max_step_height_cells, 1);
     double robot_height_m;
     private_nh.param<double>("robot_height_m", robot_height_m, 0.60);
     private_nh.param<int>("robot_clearance_height_cells", robot_clearance_height_cells, 0);
@@ -98,9 +97,6 @@ public:
     planner_.setGroundSupportXYRadiusCells(ground_support_xy_radius_cells);
     planner_.setGroundSupportDepthCells(ground_support_depth_cells);
     planner_.setMaxStepHeightM(max_step_height_m);
-    if (private_nh.hasParam("max_step_height_cells") && !private_nh.hasParam("max_step_height_m") && !private_nh.hasParam("max_step_height")) {
-      planner_.setMaxStepHeightCells(max_step_height_cells);
-    }
     double heuristic_weight;
     private_nh.param<double>("heuristic_weight", heuristic_weight, 1.20);
     planner_.setRobotHeightM(robot_height_m);

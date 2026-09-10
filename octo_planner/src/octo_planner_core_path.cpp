@@ -36,7 +36,8 @@ static std::vector<GridIndex> reconstructPath(
 bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt, 
                            const geometry_msgs::Point& goal_pt, 
                            std::vector<GridIndex>& path_cells,
-                           std::string & error_msg)
+                           std::string & error_msg,
+                           double start_yaw)
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   path_cells.clear();
@@ -51,16 +52,21 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
   GridIndex valid_start = start;
   GridIndex valid_goal = goal;
 
+  const bool is_descending = (goal_pt.z < start_pt.z - 0.05);
+  const double fwd_yaw = !std::isnan(start_yaw) ? start_yaw : std::atan2(goal_pt.y - start_pt.y, goal_pt.x - start_pt.x);
+
   if (!findNearestFreeCell(start, robot_radius_, snap_search_radius_cells_,
         require_ground_support_, strict_direct_ground_support_,
-        ground_support_xy_radius_cells_, ground_support_depth_cells_, valid_start)) {
+        ground_support_xy_radius_cells_, ground_support_depth_cells_, valid_start,
+        is_descending, fwd_yaw, true)) {
     error_msg = "Start cell is invalid/occupied and no free cell found nearby.";
     return false;
   }
 
   if (!findNearestFreeCell(goal, robot_radius_, snap_search_radius_cells_,
         require_ground_support_, strict_direct_ground_support_,
-        ground_support_xy_radius_cells_, ground_support_depth_cells_, valid_goal)) {
+        ground_support_xy_radius_cells_, ground_support_depth_cells_, valid_goal,
+        is_descending)) {
     error_msg = "Goal cell is invalid/occupied and no free cell found nearby.";
     return false;
   }
@@ -120,10 +126,12 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
       GridIndex nbr;
       bool found_nbr = false;
 
+      const bool prefer_down = (current.idx.z > valid_goal.z);
+
       if (!traversable_cells_.empty()) {
-        // 智能地表跟随：从当前高度 dz = 0 放射状探查最贴近的地表网格，快速命中平坦地面与起伏台阶
+        // 智能地表跟随：从当前高度放射状探查最贴近的地表网格，下坡/下楼优先向下探测(-dz)，上坡优先向上(+dz)
         for (int dz_mag = 0; dz_mag <= max_step; ++dz_mag) {
-          const int dz_cands[2] = {dz_mag, -dz_mag};
+          const int dz_cands[2] = {prefer_down ? -dz_mag : dz_mag, prefer_down ? dz_mag : -dz_mag};
           const int num_c = (dz_mag == 0) ? 1 : 2;
           for (int k = 0; k < num_c; ++k) {
             const int dz = dz_cands[k];
@@ -138,9 +146,9 @@ bool OctoPlannerCore::plan(const geometry_msgs::Point& start_pt,
           if (found_nbr) break;
         }
       } else {
-        // 动态局部规划模式
+        // 动态局部规划模式：同样下楼梯优先向下探测
         for (int dz_mag = 0; dz_mag <= max_step; ++dz_mag) {
-          const int dz_cands[2] = {dz_mag, -dz_mag};
+          const int dz_cands[2] = {prefer_down ? -dz_mag : dz_mag, prefer_down ? dz_mag : -dz_mag};
           const int num_c = (dz_mag == 0) ? 1 : 2;
           for (int k = 0; k < num_c; ++k) {
             const int dz = dz_cands[k];

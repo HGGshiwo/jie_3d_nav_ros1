@@ -262,66 +262,92 @@ bool OctoPlannerCore::isCellTraversable(const GridIndex & idx, double robot_radi
 }
 
 bool OctoPlannerCore::findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
-  bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const
+  bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out,
+  bool prefer_downward, double forward_yaw, bool enforce_forward) const
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  // A. Use cached traversability set if populated (for global planner compatibility)
-  if (!traversable_cells_.empty())
-  {
-    if (traversable_cells_.find(seed) != traversable_cells_.end()) {
-      out = seed; return true;
+  const bool has_heading = !std::isnan(forward_yaw);
+  const double cos_yaw = has_heading ? std::cos(forward_yaw) : 1.0;
+  const double sin_yaw = has_heading ? std::sin(forward_yaw) : 0.0;
+
+  auto searchLoop = [&](bool only_forward) -> bool {
+    // A. Use cached traversability set if populated (for global planner compatibility)
+    if (!traversable_cells_.empty())
+    {
+      if (!only_forward || !has_heading) {
+        if (traversable_cells_.find(seed) != traversable_cells_.end()) {
+          out = seed; return true;
+        }
+      }
+      for (int r = 1; r <= radius_cells; ++r)
+        for (int dz_mag = 0; dz_mag <= r; ++dz_mag)
+          for (int dx = -r; dx <= r; ++dx)
+            for (int dy = -r; dy <= r; ++dy) {
+              if (std::max({std::abs(dx), std::abs(dy), dz_mag}) != r) continue;
+              if (only_forward && has_heading) {
+                double fwd = dx * cos_yaw + dy * sin_yaw;
+                if (fwd < -0.01) continue; // Strictly exclude cells behind robot heading
+              }
+              const int dz_cands[2] = {prefer_downward ? -dz_mag : dz_mag, prefer_downward ? dz_mag : -dz_mag};
+              const int num_dz = (dz_mag == 0) ? 1 : 2;
+              for (int k = 0; k < num_dz; ++k) {
+                const int dz = dz_cands[k];
+                GridIndex c{seed.x + dx, seed.y + dy, seed.z + dz};
+                if (traversable_cells_.find(c) != traversable_cells_.end()) {
+                  out = c; return true;
+                }
+              }
+            }
+      return false;
+    }
+
+    // B. Fallback to on-the-fly checks if traversability set is empty (local planner mode)
+    if (!only_forward || !has_heading) {
+      if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth))
+      {
+        out = seed; return true;
+      }
     }
     for (int r = 1; r <= radius_cells; ++r)
-      for (int dz = 0; dz <= r; ++dz)
+      for (int dz_mag = 0; dz_mag <= r; ++dz_mag)
         for (int dx = -r; dx <= r; ++dx)
           for (int dy = -r; dy <= r; ++dy) {
-            if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
-            GridIndex c1{seed.x + dx, seed.y + dy, seed.z + dz};
-            if (traversable_cells_.find(c1) != traversable_cells_.end()) {
-              out = c1; return true;
+            if (std::max({std::abs(dx), std::abs(dy), dz_mag}) != r) continue;
+            if (only_forward && has_heading) {
+              double fwd = dx * cos_yaw + dy * sin_yaw;
+              if (fwd < -0.01) continue; // Strictly exclude cells behind robot heading
             }
-            if (dz > 0) {
-              GridIndex c2{seed.x + dx, seed.y + dy, seed.z - dz};
-              if (traversable_cells_.find(c2) != traversable_cells_.end()) {
-                out = c2; return true;
+            const int dz_cands[2] = {prefer_downward ? -dz_mag : dz_mag, prefer_downward ? dz_mag : -dz_mag};
+            const int num_dz = (dz_mag == 0) ? 1 : 2;
+            for (int k = 0; k < num_dz; ++k) {
+              const int dz = dz_cands[k];
+              GridIndex c{seed.x + dx, seed.y + dy, seed.z + dz};
+              if (isCellTraversable(c, robot_radius, require_ground_support, strict, xy_r, depth)) {
+                out = c; return true;
               }
             }
           }
-    return false;
-  }
 
-  // B. Fallback to on-the-fly checks if traversability set is empty (local planner mode)
-  if (isCellTraversable(seed, robot_radius, require_ground_support, strict, xy_r, depth))
-  {
-    out = seed; return true;
-  }
-  for (int r = 1; r <= radius_cells; ++r)
-    for (int dz = 0; dz <= r; ++dz)
-      for (int dx = -r; dx <= r; ++dx)
-        for (int dy = -r; dy <= r; ++dy) {
-          if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != r) continue;
-          GridIndex c1{seed.x + dx, seed.y + dy, seed.z + dz};
-          if (isCellTraversable(c1, robot_radius, require_ground_support, strict, xy_r, depth)) {
-            out = c1; return true;
-          }
-          if (dz > 0) {
-            GridIndex c2{seed.x + dx, seed.y + dy, seed.z - dz};
-            if (isCellTraversable(c2, robot_radius, require_ground_support, strict, xy_r, depth)) {
-              out = c2; return true;
-            }
-          }
-        }
-
-  // Progressive relaxation: if full robot_radius cannot find any cell in local window,
-  // gracefully relax radius to find a traversable escape cell (e.g. when robot is adjacent to obstacle)
-  if (robot_radius > 0.08) {
-    if (findNearestFreeCell(seed, robot_radius * 0.5, radius_cells, require_ground_support, strict, xy_r, depth, out)) {
-      return true;
+    // Progressive relaxation: if full robot_radius cannot find any cell in local window,
+    // gracefully relax radius to find a traversable escape cell
+    if (robot_radius > 0.08) {
+      if (findNearestFreeCell(seed, robot_radius * 0.5, radius_cells, require_ground_support, strict, xy_r, depth, out,
+                              prefer_downward, forward_yaw, only_forward)) {
+        return true;
+      }
     }
+
+    return false;
+  };
+
+  if (enforce_forward && has_heading)
+  {
+    if (searchLoop(true)) return true;
+    return searchLoop(false);
   }
 
-  return false;
+  return searchLoop(false);
 }
 
 bool OctoPlannerCore::queryCellDebugInfo(const GridIndex & idx, CellDebugDetails & details) const

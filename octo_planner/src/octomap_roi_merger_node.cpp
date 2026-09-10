@@ -43,14 +43,10 @@ OctomapROIMergerNode::OctomapROIMergerNode(ros::NodeHandle & nh, ros::NodeHandle
   pnh_(pnh),
   tf_listener_(tf_buffer_),
   has_odom_pose_(false),
-  has_merged_before_(false),
   robot_x_(0.0),
   robot_y_(0.0),
   robot_z_(0.0),
-  last_merged_x_(0.0),
-  last_merged_y_(0.0),
-  last_merged_z_(0.0),
-  last_update_time_(0)
+  publish_rate_(20.0)
 {
   pnh_.param<std::string>("global_octomap_topic", global_octomap_topic_, "/octomap_global");
   pnh_.param<std::string>("local_octomap_topic", local_octomap_topic_, "/octomap_local");
@@ -60,8 +56,9 @@ OctomapROIMergerNode::OctomapROIMergerNode(ros::NodeHandle & nh, ros::NodeHandle
   pnh_.param<double>("crop_radius_xy", crop_radius_xy_, 3.0);
   pnh_.param<double>("crop_height_above", crop_height_above_, 2.0);
   pnh_.param<double>("crop_height_below", crop_height_below_, 1.0);
-  pnh_.param<double>("update_dist_threshold", update_dist_threshold_, 0.15);
-  pnh_.param<double>("max_update_rate", max_update_rate_, 10.0);
+  pnh_.param<double>("publish_rate", publish_rate_, 20.0);
+  pnh_.param<double>("update_rate", publish_rate_, publish_rate_);
+  pnh_.param<double>("max_update_rate", publish_rate_, publish_rate_);
 
   odom_sub_ = nh_.subscribe(odom_topic_, 1, &OctomapROIMergerNode::onOdom, this);
   global_octomap_sub_ = nh_.subscribe(global_octomap_topic_, 1, &OctomapROIMergerNode::onGlobalOctomap, this);
@@ -70,44 +67,29 @@ OctomapROIMergerNode::OctomapROIMergerNode(ros::NodeHandle & nh, ros::NodeHandle
   fused_octomap_pub_ = pnh_.advertise<octomap_msgs::Octomap>(fused_octomap_topic_, 1, /*latch=*/true);
   query_cell_debug_srv_ = pnh_.advertiseService("query_cell_debug_info", &OctomapROIMergerNode::handleQueryCellDebugInfo, this);
 
-  ROS_INFO("OctomapROIMergerNode initialized: global=%s, local=%s, fused=%s, odom=%s",
+  if (publish_rate_ <= 0.0) {
+    publish_rate_ = 20.0;
+  }
+  timer_ = nh_.createTimer(ros::Duration(1.0 / publish_rate_), &OctomapROIMergerNode::onTimer, this);
+
+  ROS_INFO("OctomapROIMergerNode initialized: global=%s, local=%s, fused=%s, odom=%s, rate=%.1fHz",
            global_octomap_topic_.c_str(), local_octomap_topic_.c_str(),
-           fused_octomap_topic_.c_str(), odom_topic_.c_str());
+           fused_octomap_topic_.c_str(), odom_topic_.c_str(), publish_rate_);
 }
 
 void OctomapROIMergerNode::onOdom(const nav_msgs::Odometry::ConstPtr & msg)
 {
-  const double cur_x = msg->pose.pose.position.x;
-  const double cur_y = msg->pose.pose.position.y;
-  const double cur_z = msg->pose.pose.position.z;
-  const ros::Time now = ros::Time::now();
+  std::lock_guard<std::mutex> lock(pose_mutex_);
+  robot_x_ = msg->pose.pose.position.x;
+  robot_y_ = msg->pose.pose.position.y;
+  robot_z_ = msg->pose.pose.position.z;
+  odom_frame_ = msg->header.frame_id.empty() ? target_frame_ : msg->header.frame_id;
+  has_odom_pose_ = true;
+}
 
-  bool should_update = false;
-  {
-    std::lock_guard<std::mutex> lock(pose_mutex_);
-    robot_x_ = cur_x;
-    robot_y_ = cur_y;
-    robot_z_ = cur_z;
-    odom_frame_ = msg->header.frame_id.empty() ? target_frame_ : msg->header.frame_id;
-    has_odom_pose_ = true;
-
-    double d = std::hypot(cur_x - last_merged_x_, cur_y - last_merged_y_);
-    double min_interval = (max_update_rate_ > 0.0) ? (1.0 / max_update_rate_) : 0.1;
-    if (!has_merged_before_ || (d >= update_dist_threshold_ && (now - last_update_time_).toSec() >= min_interval))
-    {
-      last_merged_x_ = cur_x;
-      last_merged_y_ = cur_y;
-      last_merged_z_ = cur_z;
-      last_update_time_ = now;
-      has_merged_before_ = true;
-      should_update = true;
-    }
-  }
-
-  if (should_update)
-  {
-    processAndPublishFusedMap();
-  }
+void OctomapROIMergerNode::onTimer(const ros::TimerEvent &)
+{
+  processAndPublishFusedMap();
 }
 
 bool OctomapROIMergerNode::getLatestRobotPose(double & rx, double & ry, double & rz)
@@ -159,11 +141,15 @@ void OctomapROIMergerNode::onLocalOctomap(const octomap_msgs::Octomap::ConstPtr 
       }
     }
   }
-  processAndPublishFusedMap();
 }
 
 void OctomapROIMergerNode::processAndPublishFusedMap()
 {
+  std::unique_lock<std::mutex> merge_lock(merge_mutex_, std::try_to_lock);
+  if (!merge_lock.owns_lock()) {
+    return;
+  }
+
   octomap_msgs::Octomap::ConstPtr global_msg, local_msg;
   {
     std::lock_guard<std::mutex> lock(map_mutex_);

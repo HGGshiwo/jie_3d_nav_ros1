@@ -10,6 +10,7 @@
 #include <queue>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <cstdint>
 #include <cstddef>
 
@@ -206,7 +207,8 @@ public:
   bool plan(const geometry_msgs::Point& start_pt, 
             const geometry_msgs::Point& goal_pt, 
             std::vector<GridIndex>& path_cells,
-            std::string & error_msg);
+            std::string & error_msg,
+            double start_yaw = std::numeric_limits<double>::quiet_NaN());
 
   // Path optimization and post-processing
   bool isLineTraversable(const GridIndex & from, const GridIndex & to) const;
@@ -223,7 +225,10 @@ public:
   bool isCellTraversable(const GridIndex & idx, double robot_radius,
                         bool require_ground_support, bool strict, int xy_r, int depth) const;
   bool findNearestFreeCell(const GridIndex & seed, double robot_radius, int radius_cells,
-                           bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out) const;
+                           bool require_ground_support, bool strict, int xy_r, int depth, GridIndex & out,
+                           bool prefer_downward = false,
+                           double forward_yaw = std::numeric_limits<double>::quiet_NaN(),
+                           bool enforce_forward = false) const;
   bool queryCellDebugInfo(const GridIndex & idx, CellDebugDetails & details) const;
   double getPreblockedCost(const GridIndex & idx) const;
 

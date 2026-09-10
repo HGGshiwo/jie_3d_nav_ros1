@@ -1,5 +1,6 @@
 #include "octo_planner/octo_local_planner.h"
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <cmath>
 #include <algorithm>
@@ -18,7 +19,27 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::extractLocalBand(const
   cur_pose.header.stamp = ros::Time::now();
   cur_pose.pose.position.x = robot_pose.x;
   cur_pose.pose.position.y = robot_pose.y;
-  cur_pose.pose.position.z = robot_pose.z;
+
+  // Align cur_pose.z to terrain ground level under the robot:
+  // robot_pose.z is elevated at base_link (~0.26m in the air). On stairs, an elevated start point
+  // causes 3D A* to snap valid_start to the higher step behind the robot.
+  // We interpolate the exact ground surface elevation from the global path at the robot's current position.
+  double ground_z = robot_pose.z - robot_body_height_;
+  if (seg_idx >= 0 && seg_idx + 1 < static_cast<int>(global_plan_.size()))
+  {
+    const auto & p1 = global_plan_[seg_idx].pose.position;
+    const auto & p2 = global_plan_[seg_idx + 1].pose.position;
+    double seg_dx = p2.x - p1.x, seg_dy = p2.y - p1.y;
+    double seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy;
+    if (seg_len_sq > 1e-6)
+    {
+      double t = ((robot_pose.x - p1.x) * seg_dx + (robot_pose.y - p1.y) * seg_dy) / seg_len_sq;
+      t = std::max(0.0, std::min(1.0, t));
+      ground_z = p1.z + t * (p2.z - p1.z);
+    }
+  }
+  cur_pose.pose.position.z = ground_z;
+
   tf2::Quaternion q;
   q.setRPY(0.0, 0.0, robot_pose.yaw);
   cur_pose.pose.orientation = tf2::toMsg(q);
@@ -26,6 +47,22 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::extractLocalBand(const
 
   double accumulated_dist = 0.0;
   int idx = seg_idx + 1;
+
+  // Advance index to skip any points that fall behind the robot's current forward heading
+  const double cos_yaw = std::cos(robot_pose.yaw);
+  const double sin_yaw = std::sin(robot_pose.yaw);
+  while (idx < static_cast<int>(global_plan_.size()))
+  {
+    double dx = global_plan_[idx].pose.position.x - robot_pose.x;
+    double dy = global_plan_[idx].pose.position.y - robot_pose.y;
+    double fwd = dx * cos_yaw + dy * sin_yaw;
+    if (fwd < -0.05 && idx + 1 < static_cast<int>(global_plan_.size()))
+    {
+      idx++;
+      continue;
+    }
+    break;
+  }
   // Reasonable upper bound to prevent runaway in edge cases (e.g. 40 points per meter)
   const size_t max_points = std::max(static_cast<size_t>(100), static_cast<size_t>(max_distance * 40.0));
 
@@ -115,8 +152,8 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
       }
     }
 
-    // A. Forward search along global plan (up to ~1.75m / 35 poses further) to emerge past the obstacle
-    const int max_fwd_idx = std::min(static_cast<int>(global_plan_.size()) - 1, nominal_idx + 35);
+    // A. Forward search along global plan (up to ~3.5m / 70 poses further) to emerge past the obstacle
+    const int max_fwd_idx = std::min(static_cast<int>(global_plan_.size()) - 1, nominal_idx + 70);
     for (int i = nominal_idx + 1; i <= max_fwd_idx; ++i)
     {
       const auto & cand = global_plan_[i].pose.position;
@@ -130,12 +167,24 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
       }
     }
 
-    // B. Backward fallback: If obstacle extends too far, pick the furthest traversable pose in front
+
+
     if (!found_clean_anchor)
     {
+      // If forward search found no clean cell (e.g. nominal anchor slightly exceeds local map bounds),
+      // search inward along local_band from the tip back towards the robot, ensuring the anchor is INSIDE the map
+      // while remaining safely ahead of the robot (>= 1.0m forward heading distance).
+      double r_yaw = tf2::getYaw(local_band.front().pose.orientation);
+      double cos_y = std::cos(r_yaw);
+      double sin_y = std::sin(r_yaw);
       for (int i = static_cast<int>(local_band.size()) - 2; i >= 1; --i)
       {
         const auto & cand = local_band[i].pose.position;
+        double dx = cand.x - p_start.x;
+        double dy = cand.y - p_start.y;
+        double fwd_dist = dx * cos_y + dy * sin_y;
+        if (fwd_dist < 1.0) break; // Strictly never retreat close to or behind the robot
+
         octomap::point3d cand_pt(static_cast<float>(cand.x), static_cast<float>(cand.y), static_cast<float>(cand.z));
         if (planner_.isLineTraversable(cand_pt, cand_pt))
         {
@@ -145,6 +194,12 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
           break;
         }
       }
+
+      if (!found_clean_anchor)
+      {
+        ROS_WARN_THROTTLE(1.0, "OctoLocalPlanner: Forward anchor search (%d -> %d) and backward pullback found no clean cell. Retaining nominal forward anchor.",
+                          nominal_idx + 1, max_fwd_idx);
+      }
     }
   }
 
@@ -152,11 +207,39 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::checkAndReplanAStarDet
   // continuously plan with 3D A* from current robot pose directly to the forward anchor point on the global path!
   std::vector<GridIndex> path_cells;
   std::string error_msg;
-  if (planner_.plan(p_start, p_goal, path_cells, error_msg))
+  double robot_yaw = tf2::getYaw(local_band.front().pose.orientation);
+  if (planner_.plan(p_start, p_goal, path_cells, error_msg, robot_yaw))
   {
     auto replanned = planner_.generateSmoothPath(path_cells, local_band.front(), goal_pose_stamped, true);
     if (replanned.size() >= 2)
     {
+      // Ensure the start position matches the robot's current local position
+      replanned.front().pose.position = local_band.front().pose.position;
+
+      // Filter out any intermediate points that accidentally fall behind the robot's heading
+      double rx = local_band.front().pose.position.x;
+      double ry = local_band.front().pose.position.y;
+      double cos_y = std::cos(robot_yaw);
+      double sin_y = std::sin(robot_yaw);
+
+      std::vector<geometry_msgs::PoseStamped> fwd_replanned;
+      fwd_replanned.push_back(replanned.front());
+      for (size_t i = 1; i < replanned.size(); ++i)
+      {
+        double dx = replanned[i].pose.position.x - rx;
+        double dy = replanned[i].pose.position.y - ry;
+        double fwd = dx * cos_y + dy * sin_y;
+        if (fwd < 0.0 && i + 1 < replanned.size())
+        {
+          continue;
+        }
+        fwd_replanned.push_back(replanned[i]);
+      }
+      if (fwd_replanned.size() >= 2)
+      {
+        replanned = fwd_replanned;
+      }
+
       last_valid_detour_ = replanned;
       ROS_INFO_THROTTLE(1.0, "OctoLocalPlanner: Continuous 3D A* path generated: %zu nodes (d_lat=%.2fm, horizon=%.2fm).",
                         replanned.size(), d_lateral, local_planner_horizon_);
@@ -220,6 +303,18 @@ std::vector<geometry_msgs::PoseStamped> OctoLocalPlanner::clipTrajectoryByDistan
   double acc_d = 0.0;
   for (size_t i = 1; i < path.size(); ++i)
   {
+    // Filter out waypoints that are practically coincident with robot pose (< 0.06m)
+    // to prevent numerical singularity and tangled loops between P0 and P1
+    if (clipped.size() == 1)
+    {
+      double d0 = std::hypot(path[i].pose.position.x - clipped.front().pose.position.x,
+                             path[i].pose.position.y - clipped.front().pose.position.y);
+      if (d0 < 0.06 && i + 1 < path.size())
+      {
+        continue;
+      }
+    }
+
     clipped.push_back(path[i]);
     const auto & p_prev = clipped[clipped.size() - 2].pose.position;
     const auto & p_curr = clipped.back().pose.position;

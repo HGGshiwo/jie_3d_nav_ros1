@@ -26,6 +26,7 @@
 #include "octo_planner/gradient_footprint_model.h"
 #include "octo_planner/forbidden_zone_field.h"
 #include "octo_planner/octo_teb_optimal_planner.h"
+#include "octo_planner/local_planner_profiler.h"
 
 namespace octo_planner
 {
@@ -119,7 +120,7 @@ private:
   double local_planner_horizon_;
   double teb_planning_horizon_;
   double lookahead_distance_, tracking_xy_tol_;
-  double goal_pos_tol_, goal_yaw_tol_;
+  double goal_pos_tol_, goal_yaw_tol_, goal_z_tol_;
   double linear_gain_, lateral_gain_, heading_gain_, cross_track_angular_gain_, final_yaw_gain_;
   bool   enable_lateral_motion_;
   double max_linear_speed_, max_lateral_speed_, max_angular_speed_;
@@ -134,7 +135,6 @@ private:
   bool strict_direct_ground_support_;
   int ground_support_xy_radius_cells_;
   int ground_support_depth_cells_;
-  int max_step_height_cells_;
   int robot_clearance_height_cells_;
   int snap_search_radius_cells_;
   int local_max_iterations_;
@@ -161,6 +161,7 @@ private:
   GradientFootprintModelPtr footprint_model_;
 
   std::recursive_mutex planner_mutex_;
+  PlannerRateMonitor rate_monitor_;
 };
 
 } // namespace octo_planner

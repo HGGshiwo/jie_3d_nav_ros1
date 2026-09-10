@@ -45,6 +45,7 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   private_nh.param<double>     ("tracking_point_reached_xy_tolerance", tracking_xy_tol_,        0.20);
   private_nh.param<double>     ("goal_position_tolerance",      goal_pos_tol_,                  0.05);
   private_nh.param<double>     ("goal_yaw_tolerance",           goal_yaw_tol_,                  0.10);
+  private_nh.param<double>     ("goal_z_tolerance",             goal_z_tol_,                    0.25);
   private_nh.param<double>     ("linear_gain",                  linear_gain_,                   1.5);
   private_nh.param<double>     ("lateral_gain",                 lateral_gain_,                  1.5);
   private_nh.param<double>     ("heading_gain",                 heading_gain_,                  2.5);
@@ -70,7 +71,6 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   double max_step_height_m = 0.30;
   private_nh.param<double>("max_step_height_m", max_step_height_m, 0.30);
   private_nh.param<double>("max_step_height", max_step_height_m, max_step_height_m);
-  private_nh.param<int>("max_step_height_cells", max_step_height_cells_, 1);
   private_nh.param<int>("robot_clearance_height_cells", robot_clearance_height_cells_, 0);
   private_nh.param<int>("snap_search_radius_cells", snap_search_radius_cells_, 8);
 
@@ -110,8 +110,6 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
     core.setGroundSupportXYRadiusCells(ground_support_xy_radius_cells_);
     core.setGroundSupportDepthCells(ground_support_depth_cells_);
     core.setMaxStepHeightM(max_step_height_m);
-    if (private_nh.hasParam("max_step_height_cells") && !private_nh.hasParam("max_step_height_m") && !private_nh.hasParam("max_step_height"))
-      core.setMaxStepHeightCells(max_step_height_cells_);
     core.setRobotHeightM(robot_height_m);
     core.setHeuristicWeight(heuristic_weight);
     core.setRobotClearanceHeightCells(robot_clearance_height_cells_);
@@ -213,6 +211,7 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   teb_config_.trajectory.dt_ref = 0.20;
   teb_config_.trajectory.min_samples = 3;
   teb_config_.trajectory.max_samples = 25;
+  teb_config_.trajectory.global_plan_overwrite_orientation = true;
   teb_config_.optim.no_inner_iterations = 4;
   teb_config_.optim.no_outer_iterations = 3;
   teb_config_.optim.weight_obstacle = 0.0; // Disabled native point obstacles
@@ -221,6 +220,19 @@ void OctoLocalPlanner::initialize(std::string name, tf2_ros::Buffer* tf, costmap
   teb_planner_->initialize(teb_config_);
 
   initialized_ = true;
+
+  ros::NodeHandle move_base_nh("~");
+  double mb_ctrl_freq = 20.0;
+  if (move_base_nh.getParam("controller_frequency", mb_ctrl_freq))
+  {
+    rate_monitor_.expected_controller_freq = mb_ctrl_freq;
+    ROS_INFO("[OctoLocalPlanner] Detected move_base controller_frequency: %.2f Hz", mb_ctrl_freq);
+    if (mb_ctrl_freq <= 2.0)
+    {
+      ROS_WARN("[OctoLocalPlanner] >>> CRITICAL WARNING: move_base controller_frequency is set to %.2f Hz! Check your move_base launch / yaml configuration! <<<", mb_ctrl_freq);
+    }
+  }
+
   ROS_INFO("OctoLocalPlanner initialized with async OcTree processing & modularized architecture, sub to [%s]", octomap_topic.c_str());
 }
 
@@ -283,8 +295,9 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 {
   ROS_INFO_THROTTLE(1.0, "[OctoLocalPlanner] computeVelocityCommands CALLED! plan=%zu, init=%d", global_plan_.size(), initialized_);
 
-  LocalPlannerProfiler prof;
+  LocalPlannerProfiler prof(&rate_monitor_);
   if (!initialized_) {
+    prof.fail_reason = PlannerFailReason::NOT_INITIALIZED;
     ROS_WARN_THROTTLE(2.0, "[OctoLocalPlanner] computeVelocityCommands failed: not initialized!");
     return false;
   }
@@ -293,13 +306,18 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   prof.lock_ms = LocalPlannerProfiler::elapsedMs(t_pre_lock);
 
   if (global_plan_.empty()) {
+    prof.fail_reason = PlannerFailReason::EMPTY_PLAN;
     ROS_WARN_THROTTLE(2.0, "[OctoLocalPlanner] computeVelocityCommands failed: global_plan is empty!");
     return false;
   }
 
   RobotPose2D robot_pose;
-  if (!lookupRobotPose2D(robot_pose))
+  auto t_pre_tf = LocalPlannerProfiler::Clock::now();
+  bool tf_ok = lookupRobotPose2D(robot_pose);
+  prof.tf_ms = LocalPlannerProfiler::elapsedMs(t_pre_tf);
+  if (!tf_ok)
   {
+    prof.fail_reason = PlannerFailReason::TF_LOOKUP_ROBOT;
     ROS_WARN_THROTTLE(2.0, "[OctoLocalPlanner] computeVelocityCommands failed: lookupRobotPose2D returned false!");
     return false;
   }
@@ -315,9 +333,13 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
   // Early goal proximity check
   const auto & goal_pos = global_plan_.back().pose.position;
-  const double dist_to_goal = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
-  if (!pose_adjusting_ && (dist_to_goal < goal_pos_tol_ || 
-      (dist_to_goal < tracking_xy_tol_ && target_index_ >= static_cast<int>(global_plan_.size()) - 3)))
+  const double dist_xy = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
+  const double robot_ground_z = robot_pose.z - robot_body_height_;
+  const double dist_z = std::min(std::abs(goal_pos.z - robot_ground_z), std::abs(goal_pos.z - robot_pose.z));
+  const bool near_goal_pos = (dist_xy < goal_pos_tol_) && (dist_z < goal_z_tol_);
+
+  if (!pose_adjusting_ && (near_goal_pos || 
+      (dist_xy < tracking_xy_tol_ && dist_z < goal_z_tol_ && target_index_ >= static_cast<int>(global_plan_.size()) - 3)))
   {
     pose_adjusting_ = true;
   }
@@ -326,7 +348,10 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   if (pose_adjusting_)
   {
     geometry_msgs::PoseStamped final_pose_base;
-    if (!transformToBase(global_plan_.back(), final_pose_base)) return false;
+    if (!transformToBase(global_plan_.back(), final_pose_base)) {
+      prof.fail_reason = PlannerFailReason::TF_TRANSFORM_BASE;
+      return false;
+    }
 
     geometry_msgs::Twist raw_cmd;
     raw_cmd.linear.x = final_pose_base.pose.position.x * linear_gain_;
@@ -337,11 +362,16 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     double final_yaw_error = 0.0;
     if (align_final_yaw_)
     {
-      if (!computeFinalYawErrorXY(global_plan_.back(), final_yaw_error)) return false;
+      if (!computeFinalYawErrorXY(global_plan_.back(), final_yaw_error)) {
+        prof.fail_reason = PlannerFailReason::TF_YAW_ERROR;
+        return false;
+      }
       raw_cmd.angular.z = final_yaw_error * final_yaw_gain_;
     }
 
-    const bool pos_ok = std::hypot(final_pose_base.pose.position.x, final_pose_base.pose.position.y) < goal_pos_tol_;
+    const double rel_dist_xy = std::hypot(final_pose_base.pose.position.x, final_pose_base.pose.position.y);
+    const double rel_dist_z = std::min(std::abs(final_pose_base.pose.position.z), std::abs(final_pose_base.pose.position.z + robot_body_height_));
+    const bool pos_ok = (rel_dist_xy < goal_pos_tol_) && (rel_dist_z < goal_z_tol_);
     const bool yaw_ok = !align_final_yaw_ || std::abs(final_yaw_error) < goal_yaw_tol_;
 
     if (pos_ok && yaw_ok)
@@ -402,6 +432,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
   if (local_astar_band.size() < 2)
   {
+    prof.fail_reason = PlannerFailReason::ASTAR_DETOUR_EMPTY;
     velocity_smoother_.reset();
     cmd_vel = geometry_msgs::Twist();
     last_cmd_vel_ = cmd_vel;
@@ -441,6 +472,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
     visualizer_.publishRawLocalBandMarkers(local_band);
 
+    bool teb_success = false;
     if (use_teb_optimizer_ && teb_planner_)
     {
       auto t_pre_field = LocalPlannerProfiler::Clock::now();
@@ -449,7 +481,18 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
       auto t_pre_teb = LocalPlannerProfiler::Clock::now();
       std::vector<geometry_msgs::PoseStamped> teb_band;
-      if (teb_planner_->planWithForbiddenZone(local_band, &last_cmd_vel_, false,
+      bool is_near_final_goal = false;
+      if (!global_plan_.empty())
+      {
+        const auto& final_p = global_plan_.back().pose.position;
+        const auto& curr_p = local_band.back().pose.position;
+        if (std::hypot(final_p.x - curr_p.x, final_p.y - curr_p.y) < 0.30)
+        {
+          is_near_final_goal = true;
+        }
+      }
+      bool free_goal_vel = !is_near_final_goal;
+      if (teb_planner_->planWithForbiddenZone(local_band, &last_cmd_vel_, free_goal_vel,
                                              forbidden_field_, *footprint_model_, weight_forbidden_zone_))
       {
         double cur_ground_z = robot_pose.z;
@@ -462,6 +505,7 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         if (teb_band.size() >= 2)
         {
           local_band = teb_band;
+          teb_success = true;
         }
       }
       else
@@ -477,24 +521,8 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
       prof.teb_ms = LocalPlannerProfiler::elapsedMs(t_pre_teb);
     }
 
-    // Temporal inter-frame low-pass filter (EMA)
-    if (!prev_optimized_local_plan_.empty() && prev_optimized_local_plan_.size() == local_band.size()) {
-      double d_start = std::hypot(local_band[0].pose.position.x - prev_optimized_local_plan_[0].pose.position.x,
-                                  local_band[0].pose.position.y - prev_optimized_local_plan_[0].pose.position.y);
-      if (d_start < 0.30) {
-        double alpha = 0.35; // 35% new optimized, 65% previous frame
-        for (size_t i = 1; i < local_band.size() - 1; ++i) {
-          auto & p = local_band[i].pose.position;
-          const auto & pp = prev_optimized_local_plan_[i].pose.position;
-          p.x = alpha * p.x + (1.0 - alpha) * pp.x;
-          p.y = alpha * p.y + (1.0 - alpha) * pp.y;
-          p.z = alpha * p.z + (1.0 - alpha) * pp.z;
-        }
-      }
-    }
-
-    prev_optimized_local_plan_ = local_band;
     optimized_local_plan_ = local_band;
+    prev_optimized_local_plan_ = local_band;
     visualizer_.publishLocalBandMarkers(optimized_local_plan_);
 
     if (local_plan_pub_.getNumSubscribers() > 0)
@@ -517,54 +545,38 @@ bool OctoLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   }
 
   // Check goal proximity & final tracking point
-  if (dist_to_goal < goal_pos_tol_ || 
-      (dist_to_goal < tracking_xy_tol_ && target_index_ >= static_cast<int>(global_plan_.size()) - 3)) {
+  if (near_goal_pos || 
+      (dist_xy < tracking_xy_tol_ && dist_z < goal_z_tol_ && target_index_ >= static_cast<int>(global_plan_.size()) - 3)) {
     pose_adjusting_ = true;
     cmd_vel = geometry_msgs::Twist();
     return true;
   }
 
-  // Select lookahead tracking target on optimized local plan
-  TrackingTarget target;
-  const double effective_lookahead = std::max(0.15, std::min(lookahead_distance_, dist_to_goal));
-
-  int tracking_idx = 1;
-  for (size_t i = 1; i < optimized_local_plan_.size(); ++i) {
-    double dx = optimized_local_plan_[i].pose.position.x - robot_pose.x;
-    double dy = optimized_local_plan_[i].pose.position.y - robot_pose.y;
-    tracking_idx = i;
-    if (std::hypot(dx, dy) >= effective_lookahead) break;
+  // Output control velocity: directly use TEB's time-optimal velocity command
+  bool teb_vel_valid = false;
+  double teb_vx = 0.0, teb_vy = 0.0, teb_wz = 0.0;
+  if (use_teb_optimizer_ && teb_planner_)
+  {
+    if (teb_planner_->getVelocityCommand(teb_vx, teb_vy, teb_wz, 1))
+    {
+      teb_vel_valid = true;
+    }
   }
 
-  geometry_msgs::PoseStamped target_pose_base;
-  if (!transformToBase(optimized_local_plan_[tracking_idx], target_pose_base)) return false;
-
-  target.base_x = target_pose_base.pose.position.x;
-  target.base_y = target_pose_base.pose.position.y;
-
-  // Control command calculation with acceleration smoothing via D1VelocitySmoother
-  // Pure Pursuit: true heading error calculation
-  const double heading_error = std::atan2(target.base_y, target.base_x);
-  const double abs_heading   = std::abs(heading_error);
-  const double cruise_speed  = velocity_smoother_.getParams().max_linear_speed;
-
-  // In-place rotation threshold:
-  // When heading error is large (> 45 deg / 0.785 rad), smoothly scale down forward speed.
-  // Beyond 60 deg (1.05 rad), stop forward speed completely to rotate in place towards the target,
-  // eliminating persistent orbital/spinning circles ("dog chasing tail").
-  double corner_scale = 0.0;
-  if (abs_heading < 0.785) {
-    corner_scale = std::cos(heading_error);
-  } else if (abs_heading < 1.05) {
-    corner_scale = std::cos(heading_error) * (1.05 - abs_heading) / (1.05 - 0.785);
+  if (!teb_vel_valid)
+  {
+    prof.fail_reason = PlannerFailReason::TEB_NO_FEASIBLE_VEL;
+    ROS_WARN_THROTTLE(1.0, "[OctoLocalPlanner] TEB failed to compute feasible velocity! Stopping robot.");
+    velocity_smoother_.reset();
+    cmd_vel = geometry_msgs::Twist();
+    last_cmd_vel_ = cmd_vel;
+    return false;
   }
-
-  const double goal_scale    = dist_to_goal < 0.6 ? std::max(0.1, dist_to_goal / 0.6) : 1.0;
 
   geometry_msgs::Twist raw_cmd;
-  raw_cmd.linear.x  = cruise_speed * corner_scale * goal_scale;
-  raw_cmd.linear.y  = (enable_lateral_motion_ && abs_heading < 0.785) ? target.base_y * lateral_gain_ : 0.0;
-  raw_cmd.angular.z = heading_error * heading_gain_ + (abs_heading < 0.785 ? target.base_y * cross_track_angular_gain_ : 0.0);
+  raw_cmd.linear.x = teb_vx;
+  raw_cmd.linear.y = enable_lateral_motion_ ? teb_vy : 0.0;
+  raw_cmd.angular.z = teb_wz;
 
   cmd_vel = velocity_smoother_.smooth(raw_cmd, dt);
   last_cmd_vel_ = cmd_vel;

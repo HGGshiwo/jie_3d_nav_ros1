@@ -16,19 +16,6 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
   RobotPose2D robot_pose;
   if (!lookupRobotPose2D(robot_pose)) return target_index_;
 
-  // The global plan z comes from ground-support cells (terrain frame), while
-  // robot_pose.z is base_link (~0.3m above ground). On stair descents the plan
-  // z drops along the path, so projecting with base z biases the anchor toward
-  // higher-z (behind) segments and the tracking point ends up behind the robot.
-  // Match against the terrain height under the robot instead; fall back to the
-  // raw base z until the local terrain field has been built.
-  double ref_z = robot_pose.z;
-  double ground_z = 0.0;
-  if (forbidden_field_.getTerrainHeight(robot_pose.x, robot_pose.y, ground_z))
-  {
-    ref_z = ground_z;
-  }
-
   const std::size_t plan_size = global_plan_.size();
   if (plan_size <= 1)
   {
@@ -42,10 +29,11 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
     best_seg_idx = 0;
   }
 
-  // Forward-only search window: the anchor must never slide backward along the
-  // plan. On stair descents, projection noise made the anchor retreat the full
-  // allowed margin (-2 segments) every control cycle, which dropped the
-  // tracking point behind the robot.
+  // Forward-only search window in horizontal 2D plane:
+  // On descending stairs, 3D Euclidean distance creates a severe backward bias because
+  // the robot's base_link is elevated in the air, making it physically closer in Z to the higher
+  // (upstream/behind) steps. Projecting purely in horizontal 2D (XY) plane accurately determines
+  // true forward progress along the path without any Z slope corruption.
   const int search_start = std::max(0, best_seg_idx);
   const int search_end = std::min(static_cast<int>(plan_size) - 1, best_seg_idx + 40);
 
@@ -55,21 +43,19 @@ int OctoLocalPlanner::findInitialTargetIndex3D()
   {
     const auto & p1 = global_plan_[i].pose.position;
     const auto & p2 = global_plan_[i + 1].pose.position;
-    const double dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
-    const double seg_sq_len = dx * dx + dy * dy + dz * dz;
+    const double dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const double seg_sq_len = dx * dx + dy * dy;
 
     double t = 0.0;
     if (seg_sq_len > 1.0e-6)
     {
-      t = ((robot_pose.x - p1.x) * dx + (robot_pose.y - p1.y) * dy + (ref_z - p1.z) * dz) / seg_sq_len;
+      t = ((robot_pose.x - p1.x) * dx + (robot_pose.y - p1.y) * dy) / seg_sq_len;
       t = std::max(0.0, std::min(1.0, t));
     }
     const double px = p1.x + t * dx;
     const double py = p1.y + t * dy;
-    const double pz = p1.z + t * dz;
     const double sq_dist = (robot_pose.x - px) * (robot_pose.x - px) +
-                           (robot_pose.y - py) * (robot_pose.y - py) +
-                           (ref_z - pz) * (ref_z - pz);
+                           (robot_pose.y - py) * (robot_pose.y - py);
 
     if (sq_dist < min_proj_sq_dist)
     {
@@ -166,7 +152,11 @@ bool OctoLocalPlanner::isGoalReached()
     if (lookupRobotPose2D(robot_pose))
     {
       const auto & goal_pos = global_plan_.back().pose.position;
-      const double dist_to_goal = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
+      const double dist_xy = std::hypot(goal_pos.x - robot_pose.x, goal_pos.y - robot_pose.y);
+      const double robot_ground_z = robot_pose.z - robot_body_height_;
+      const double dist_z = std::min(std::abs(goal_pos.z - robot_ground_z), std::abs(goal_pos.z - robot_pose.z));
+      const bool pos_ok = (dist_xy < goal_pos_tol_) && (dist_z < goal_z_tol_);
+
       double final_yaw_error = 0.0;
       bool yaw_ok = true;
       if (align_final_yaw_)
@@ -176,12 +166,12 @@ bool OctoLocalPlanner::isGoalReached()
           yaw_ok = std::abs(final_yaw_error) < goal_yaw_tol_;
         }
       }
-      if (dist_to_goal < goal_pos_tol_ && yaw_ok)
+      if (pos_ok && yaw_ok)
       {
         resetPlanState();
         velocity_smoother_.reset();
-        ROS_INFO("[OctoLocalPlanner] Goal reached directly verified! dist=%.3fm, yaw_err=%.3frad.",
-                 dist_to_goal, final_yaw_error);
+        ROS_INFO("[OctoLocalPlanner] Goal reached directly verified! dist_xy=%.3fm, dist_z=%.3fm, yaw_err=%.3frad.",
+                 dist_xy, dist_z, final_yaw_error);
         return true;
       }
     }

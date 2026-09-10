@@ -121,33 +121,12 @@ bool OctoTebOptimalPlanner::planWithForbiddenZone(const std::vector<geometry_msg
     return false;
   }
 
-  if (!teb_.isInit())
-  {
-    teb_.initTrajectoryToGoal(initial_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta,
-                              cfg_->trajectory.global_plan_overwrite_orientation,
-                              cfg_->trajectory.min_samples, cfg_->trajectory.allow_init_with_backwards_motion);
-    is_warm_start_ = false;
-  }
-  else
-  {
-    teb_local_planner::PoseSE2 start_(initial_plan.front().pose);
-    teb_local_planner::PoseSE2 goal_(initial_plan.back().pose);
-    if (teb_.sizePoses() > 0 &&
-        (goal_.position() - teb_.BackPose().position()).norm() < cfg_->trajectory.force_reinit_new_goal_dist &&
-        std::abs(g2o::normalize_theta(goal_.theta() - teb_.BackPose().theta())) < cfg_->trajectory.force_reinit_new_goal_angular)
-    {
-      teb_.updateAndPruneTEB(start_, goal_, cfg_->trajectory.min_samples);
-      is_warm_start_ = true;
-    }
-    else
-    {
-      teb_.clearTimedElasticBand();
-      teb_.initTrajectoryToGoal(initial_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta,
-                                cfg_->trajectory.global_plan_overwrite_orientation,
-                                cfg_->trajectory.min_samples, cfg_->trajectory.allow_init_with_backwards_motion);
-      is_warm_start_ = false;
-    }
-  }
+  // Always seed freshly from the latest A* initial_plan to avoid stale knotted states
+  teb_.clearTimedElasticBand();
+  teb_.initTrajectoryToGoal(initial_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta,
+                            cfg_->trajectory.global_plan_overwrite_orientation,
+                            cfg_->trajectory.min_samples, cfg_->trajectory.allow_init_with_backwards_motion);
+  is_warm_start_ = false;
 
   if (start_vel)
     setVelocityStart(*start_vel);

@@ -69,6 +69,7 @@
         <param name="crop_radius_xy" value="3.0" />
         <param name="crop_height_above" value="2.0" />
         <param name="crop_height_below" value="1.0" />
+        <param name="publish_rate" value="20.0" />
     </node>
 
     <!-- 3. 包含纯粹的 move_base 导航规划节点 -->
